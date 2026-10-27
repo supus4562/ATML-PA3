@@ -82,12 +82,20 @@ def load_fresh_qwen_model(config: Task1Config, device: torch.device, is_adapter:
     else:
         torch_dtype = torch.float32
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        attn_implementation=config.model.attn_implementation,
-        trust_remote_code=True,
-    ).to(device)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=torch_dtype,
+            attn_implementation=config.model.attn_implementation,
+            trust_remote_code=True,
+        ).to(device)
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            attn_implementation=config.model.attn_implementation,
+            trust_remote_code=True,
+        ).to(device)
 
     if hasattr(model.config, "enable_thinking"):
         model.config.enable_thinking = False
@@ -111,8 +119,8 @@ def main():
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - Hopper H200/Blackwell Tensor Cores active.")
-        # Hopper H200 & Blackwell performance optimizations
+        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - Ampere/Hopper/Blackwell Tensor Cores active.")
+        # Ampere/Hopper/Blackwell high-throughput performance optimizations
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True

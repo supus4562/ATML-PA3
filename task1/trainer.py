@@ -165,15 +165,19 @@ def train_variant(
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=(config.training.fp16 and device.type == "cuda"))
 
-    # 5. DataLoader with dynamic collator (num_workers=0 avoids host RAM duplication in containers)
+    # 5. DataLoader with dynamic collator (high-throughput multi-worker prefetching)
     collator = DynamicPaddingCollator(pad_token_id=0, ignore_index=-100)
+    num_cpus = os.cpu_count() or 1
+    num_workers = min(4, max(1, num_cpus - 1)) if device.type == "cuda" else 0
     data_loader = DataLoader(
         dataset,
         batch_size=config.training.micro_batch_size,
         shuffle=False,  # STRICT INVARIANT: Do not shuffle retained examples!
         collate_fn=collator,
-        num_workers=0,
+        num_workers=num_workers,
         pin_memory=(device.type == "cuda"),
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     # 6. Resume state if requested

@@ -16,6 +16,7 @@ import string
 from typing import Dict, List, Optional, Set, Tuple, Any
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 
@@ -245,9 +246,14 @@ class DynamicPaddingCollator:
             labs = item["labels"]
             pad_len = batch_max_len - len(ids)
 
-            padded_id = torch.cat([ids, torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
-            padded_lab = torch.cat([labs, torch.full((pad_len,), self.ignore_index, dtype=torch.long)])
-            attn_mask = torch.cat([torch.ones(len(ids), dtype=torch.long), torch.zeros(pad_len, dtype=torch.long)])
+            if pad_len > 0:
+                padded_id = torch.cat([ids, torch.full((pad_len,), self.pad_token_id, dtype=torch.long)])
+                padded_lab = torch.cat([labs, torch.full((pad_len,), self.ignore_index, dtype=torch.long)])
+                attn_mask = torch.cat([torch.ones(len(ids), dtype=torch.long), torch.zeros(pad_len, dtype=torch.long)])
+            else:
+                padded_id = ids
+                padded_lab = labs
+                attn_mask = torch.ones(len(ids), dtype=torch.long)
 
             padded_input_ids.append(padded_id)
             padded_labels.append(padded_lab)
@@ -273,10 +279,11 @@ def compute_normalized_effective_batch_loss(
     shift_logits = logits[..., :-1, :].contiguous()
     shift_labels = labels[..., 1:].contiguous()
 
-    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=ignore_index, reduction="sum")
-    sum_loss = loss_fct(
+    sum_loss = F.cross_entropy(
         shift_logits.view(-1, shift_logits.size(-1)),
         shift_labels.view(-1),
+        ignore_index=ignore_index,
+        reduction="sum",
     )
 
     valid_tokens = int((shift_labels != ignore_index).sum().item())

@@ -70,6 +70,7 @@ def run_standalone_gsm8k_eval(
     """
     High-throughput standalone GSM8K evaluation matching lm-eval gsm8k_cot specifications.
     Uses non-thinking chat template, greedy decoding, 1024 new tokens, flexible extraction.
+    Uses left-padding for causal decoder-only batched generation.
     """
     model.eval()
     results = []
@@ -78,73 +79,87 @@ def run_standalone_gsm8k_eval(
     unextractable_count = 0
     truncated_count = 0
 
-    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {batch_size}...")
+    orig_padding_side = tokenizer.padding_side
+    orig_pad_token_id = tokenizer.pad_token_id
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    for i in range(0, total_count, batch_size):
-        batch = test_examples[i: i + batch_size]
-        prompts = []
-        gold_answers = []
+    # Optimized generation batch size
+    actual_batch_size = min(batch_size, 32) if device.type == "cuda" else batch_size
+    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded)...")
 
-        for item in batch:
-            q = item["question"]
-            gold = extract_gsm8k_answer(item.get("answer", ""))
-            gold_answers.append(gold)
+    try:
+        for i in range(0, total_count, actual_batch_size):
+            batch = test_examples[i: i + actual_batch_size]
+            prompts = []
+            gold_answers = []
 
-            # Non-thinking chat template
-            msgs = [{"role": "user", "content": f"Question: {q}\nAnswer: Let's think step by step."}]
-            try:
-                p_text = tokenizer.apply_chat_template(
-                    msgs,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
+            for item in batch:
+                q = item["question"]
+                gold = extract_gsm8k_answer(item.get("answer", ""))
+                gold_answers.append(gold)
+
+                # Non-thinking chat template
+                msgs = [{"role": "user", "content": f"Question: {q}\nAnswer: Let's think step by step."}]
+                try:
+                    p_text = tokenizer.apply_chat_template(
+                        msgs,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    p_text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+                prompts.append(p_text)
+
+            inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
+            in_len = inputs.input_ids.shape[1]
+
+            with torch.inference_mode():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
                 )
-            except TypeError:
-                p_text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
-            prompts.append(p_text)
 
-        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(device)
-        in_len = inputs.input_ids.shape[1]
+            for b_idx in range(len(batch)):
+                gen_ids = outputs[b_idx, in_len:]
+                gen_len = len(gen_ids)
+                truncated = (gen_len >= max_new_tokens)
+                if truncated:
+                    truncated_count += 1
 
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
+                gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+                pred_ans = extract_gsm8k_answer(gen_text)
+                gold_ans = gold_answers[b_idx]
 
-        for b_idx in range(len(batch)):
-            gen_ids = outputs[b_idx, in_len:]
-            gen_len = len(gen_ids)
-            truncated = (gen_len >= max_new_tokens)
-            if truncated:
-                truncated_count += 1
+                is_correct = False
+                if pred_ans is None:
+                    unextractable_count += 1
+                elif gold_ans is not None and pred_ans == gold_ans:
+                    is_correct = True
+                    correct_count += 1
 
-            gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
-            pred_ans = extract_gsm8k_answer(gen_text)
-            gold_ans = gold_answers[b_idx]
+                results.append({
+                    "question": batch[b_idx]["question"],
+                    "gold_answer": gold_ans,
+                    "generated_text": gen_text,
+                    "extracted_answer": pred_ans,
+                    "is_correct": is_correct,
+                    "truncated": truncated,
+                    "tokens_generated": gen_len,
+                })
 
-            is_correct = False
-            if pred_ans is None:
-                unextractable_count += 1
-            elif gold_ans is not None and pred_ans == gold_ans:
-                is_correct = True
-                correct_count += 1
-
-            results.append({
-                "question": batch[b_idx]["question"],
-                "gold_answer": gold_ans,
-                "generated_text": gen_text,
-                "extracted_answer": pred_ans,
-                "is_correct": is_correct,
-                "truncated": truncated,
-                "tokens_generated": gen_len,
-            })
-
-        if (i + batch_size) % 200 == 0 or (i + batch_size) >= total_count:
-            print(f"  Processed {min(i + batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + batch_size, total_count)} ({correct_count/min(i + batch_size, total_count)*100:.2f}%)")
+            if (i + actual_batch_size) % 200 == 0 or (i + actual_batch_size) >= total_count:
+                print(f"  Processed {min(i + actual_batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + actual_batch_size, total_count)} ({correct_count/min(i + actual_batch_size, total_count)*100:.2f}%)")
+    finally:
+        tokenizer.padding_side = orig_padding_side
+        tokenizer.pad_token_id = orig_pad_token_id
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     accuracy = correct_count / max(1, total_count)
     return {
@@ -164,48 +179,88 @@ def run_standalone_likelihood_eval(
     dataset_name: str,
     examples: List[Dict[str, Any]],
     device: torch.device,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> Dict[str, Any]:
     """
-    Likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
+    Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
     Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
+    Processes candidates in vectorized batches for high throughput (~15s per benchmark on A100).
     """
     model.eval()
     correct_raw = 0
     correct_norm = 0
     total = len(examples)
 
-    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via candidate likelihood...")
+    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood...")
 
-    for item in examples:
+    flat_candidates = []
+    for ex_idx, item in enumerate(examples):
         context = item.get("context", "") or item.get("prompt", "")
         choices = item.get("choices", [])
-        gold_idx = item.get("gold_index", 0)
-
-        choice_logps = []
-        choice_lengths = []
 
         ctx_ids = tokenizer.encode(context, add_special_tokens=False)
+        ctx_len = len(ctx_ids)
 
-        for choice in choices:
+        for choice_idx, choice in enumerate(choices):
             full_text = context + (" " if not context.endswith(" ") and not choice.startswith(" ") else "") + choice
             full_ids = tokenizer.encode(full_text, add_special_tokens=False)
-            choice_len = len(full_ids) - len(ctx_ids)
-            choice_lengths.append(max(1, choice_len))
+            choice_len = max(1, len(full_ids) - ctx_len)
 
-            input_tensor = torch.tensor([full_ids], dtype=torch.long, device=device)
-            with torch.no_grad():
-                logits = model(input_tensor).logits[0]
-                shift_logits = logits[:-1, :]
-                shift_labels = input_tensor[0, 1:]
-                log_probs = torch.log_softmax(shift_logits, dim=-1)
-                token_logps = log_probs[range(len(shift_labels)), shift_labels]
-                choice_logp = token_logps[-choice_len:].sum().item()
-                choice_logps.append(choice_logp)
+            flat_candidates.append({
+                "ex_idx": ex_idx,
+                "choice_idx": choice_idx,
+                "full_ids": full_ids,
+                "choice_len": choice_len,
+            })
 
-        best_raw = int(np.argmax(choice_logps))
-        norm_logps = [lp / cl for lp, cl in zip(choice_logps, choice_lengths)]
-        best_norm = int(np.argmax(norm_logps))
+    num_choices_per_ex = [len(x.get("choices", [])) for x in examples]
+    scores_raw = [[0.0] * n for n in num_choices_per_ex]
+    scores_norm = [[0.0] * n for n in num_choices_per_ex]
+
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0)
+
+    for i in range(0, len(flat_candidates), batch_size):
+        chunk = flat_candidates[i: i + batch_size]
+        max_len = max(len(c["full_ids"]) for c in chunk)
+
+        batch_input_ids = []
+        batch_attn_mask = []
+        for c in chunk:
+            fids = c["full_ids"]
+            plen = max_len - len(fids)
+            batch_input_ids.append(fids + [pad_id] * plen)
+            batch_attn_mask.append([1] * len(fids) + [0] * plen)
+
+        input_tensor = torch.tensor(batch_input_ids, dtype=torch.long, device=device)
+        attn_tensor = torch.tensor(batch_attn_mask, dtype=torch.long, device=device)
+
+        with torch.inference_mode():
+            outputs = model(input_ids=input_tensor, attention_mask=attn_tensor)
+            logits = outputs.logits
+            shift_logits = logits[:, :-1, :]
+            shift_labels = input_tensor[:, 1:]
+            log_probs = torch.log_softmax(shift_logits, dim=-1)
+            token_logps = torch.gather(log_probs, 2, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+        for k, c in enumerate(chunk):
+            valid_len = len(c["full_ids"])
+            choice_len = c["choice_len"]
+            choice_start = max(1, valid_len - choice_len)
+            choice_end = valid_len
+            cand_logp = token_logps[k, (choice_start - 1):(choice_end - 1)].sum().item()
+            cand_norm = cand_logp / choice_len
+
+            scores_raw[c["ex_idx"]][c["choice_idx"]] = cand_logp
+            scores_norm[c["ex_idx"]][c["choice_idx"]] = cand_norm
+
+        if (i + batch_size) % (batch_size * 100) == 0 or (i + batch_size) >= len(flat_candidates):
+            pct = min(100.0, (i + batch_size) / len(flat_candidates) * 100.0)
+            print(f"  Processed {min(i + batch_size, len(flat_candidates))}/{len(flat_candidates)} candidates ({pct:.1f}%)...")
+
+    for ex_idx, item in enumerate(examples):
+        gold_idx = item.get("gold_index", 0)
+        best_raw = int(np.argmax(scores_raw[ex_idx]))
+        best_norm = int(np.argmax(scores_norm[ex_idx]))
 
         if best_raw == gold_idx:
             correct_raw += 1
@@ -214,6 +269,9 @@ def run_standalone_likelihood_eval(
 
     acc_raw = (correct_raw / max(1, total)) * 100.0
     acc_norm = (correct_norm / max(1, total)) * 100.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return {
         "acc": float(acc_raw),
