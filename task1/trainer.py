@@ -160,16 +160,19 @@ def train_variant(
         total_steps=config.training.total_updates,
         peak_lr=peak_lr,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(config.training.fp16 and device.type == "cuda"))
+    if hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler("cuda", enabled=(config.training.fp16 and device.type == "cuda"))
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=(config.training.fp16 and device.type == "cuda"))
 
-    # 5. DataLoader with dynamic collator
+    # 5. DataLoader with dynamic collator (num_workers=0 avoids host RAM duplication in containers)
     collator = DynamicPaddingCollator(pad_token_id=0, ignore_index=-100)
     data_loader = DataLoader(
         dataset,
         batch_size=config.training.micro_batch_size,
         shuffle=False,  # STRICT INVARIANT: Do not shuffle retained examples!
         collate_fn=collator,
-        num_workers=2 if os.cpu_count() and os.cpu_count() > 2 else 0,
+        num_workers=0,
         pin_memory=(device.type == "cuda"),
     )
 
@@ -208,10 +211,8 @@ def train_variant(
     model.train()
     if config.training.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
-
-    accum_loss = 0.0
-    accum_tokens = 0
-    microbatch_cache = []
+        if hasattr(model, "config"):
+            model.config.use_cache = False
 
     grad_accum_steps = config.training.gradient_accumulation_steps
     target_updates = config.training.total_updates
@@ -220,6 +221,10 @@ def train_variant(
     ckpt_save_dir = os.path.join(output_checkpoint_dir, variant_name)
     os.makedirs(ckpt_save_dir, exist_ok=True)
 
+    microbatch_buffer = []
+    last_print_time = time.time()
+    last_print_update = current_update
+
     with training_timer:
         for batch_idx, batch in enumerate(data_loader):
             if batch_idx < start_batch_idx:
@@ -227,31 +232,39 @@ def train_variant(
             if current_update >= target_updates:
                 break
 
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            labels = batch["labels"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            microbatch_buffer.append(batch)
 
-            # Microbatch forward pass in FP16
-            with torch.cuda.amp.autocast(enabled=(config.training.fp16 and device.type == "cuda"), dtype=torch.float16):
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                )
-                sum_loss, valid_tokens = compute_normalized_effective_batch_loss(outputs.logits, labels)
-
-            microbatch_cache.append((sum_loss, valid_tokens))
-            accum_tokens += valid_tokens
-
-            # Backward pass when accumulation window is reached or at dataset end
-            if len(microbatch_cache) == grad_accum_steps or (batch_idx + 1) == len(data_loader):
-                # Normalize accumulated loss over all valid response tokens in the effective batch
+            # Process accumulation window (effective batch = 32 examples)
+            if len(microbatch_buffer) == grad_accum_steps or (batch_idx + 1) == len(data_loader):
+                # Calculate total valid response tokens across this effective batch upfront
+                accum_tokens = sum((mb["labels"] != -100).sum().item() for mb in microbatch_buffer)
                 norm_denominator = max(1, accum_tokens)
                 total_sft_loss_val = 0.0
 
-                for mb_sum_loss, _ in microbatch_cache:
-                    mb_scaled_loss = mb_sum_loss / norm_denominator
+                # Microbatch forward & immediate backward to discard activation graphs right away
+                for mb in microbatch_buffer:
+                    input_ids = mb["input_ids"].to(device, non_blocking=True)
+                    labels = mb["labels"].to(device, non_blocking=True)
+                    attention_mask = mb["attention_mask"].to(device, non_blocking=True)
+
+                    if hasattr(torch.amp, "autocast"):
+                        autocast_ctx = torch.amp.autocast("cuda", enabled=(config.training.fp16 and device.type == "cuda"), dtype=torch.float16)
+                    else:
+                        autocast_ctx = torch.cuda.amp.autocast(enabled=(config.training.fp16 and device.type == "cuda"), dtype=torch.float16)
+
+                    with autocast_ctx:
+                        outputs = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                        )
+                        sum_loss, _ = compute_normalized_effective_batch_loss(outputs.logits, labels)
+                        mb_scaled_loss = sum_loss / norm_denominator
+
                     total_sft_loss_val += mb_scaled_loss.item()
                     scaler.scale(mb_scaled_loss).backward()
+
+                # Free microbatch buffer immediately
+                microbatch_buffer.clear()
 
                 # Add L2-SP penalty if enabled
                 omega_val = 0.0
@@ -259,7 +272,6 @@ def train_variant(
                 if lambda_l2sp > 0.0 and theta_0 is not None:
                     penalty_tensor, omega_val = compute_l2sp_penalty(model, theta_0)
                     lambda_omega_val = lambda_l2sp * omega_val
-                    # Scale and backward penalty
                     scaler.scale(lambda_l2sp * penalty_tensor).backward()
 
                 # Optimizer update
@@ -295,9 +307,16 @@ def train_variant(
                 }
                 logs["history"].append(step_log)
 
-                if current_update % 50 == 0 or current_update in config.training.checkpoint_updates:
+                if current_update == 1 or current_update % 25 == 0 or current_update in config.training.checkpoint_updates:
+                    now = time.time()
+                    dt = now - last_print_time
+                    d_steps = max(1, current_update - last_print_update)
+                    sec_per_step = dt / d_steps if last_print_update > 0 or current_update > 1 else dt
+                    last_print_time = now
+                    last_print_update = current_update
                     print(f"[{variant_name}] Update {current_update:4d}/{target_updates} | "
-                          f"SFT Loss: {total_sft_loss_val:.4f} | LR: {current_lr:.2e} | Grad Norm: {step_log['grad_norm']:.2f}")
+                          f"SFT Loss: {total_sft_loss_val:.4f} | LR: {current_lr:.2e} | "
+                          f"Grad Norm: {step_log['grad_norm']:.2f} | Speed: {sec_per_step:.2f}s/step")
 
                 # Checkpoint saving schedule: 312, 625, 937, 1250
                 if current_update in config.training.checkpoint_updates:
@@ -328,11 +347,6 @@ def train_variant(
                             disp = compute_parameter_displacement(model, theta_0)
                             logs["displacements"][str(current_update)] = disp
                             print(f"[{variant_name}] ||theta - theta_0||_2 at update {current_update}: {disp:.6f}")
-
-                # Reset accumulator
-                accum_loss = 0.0
-                accum_tokens = 0
-                microbatch_cache.clear()
 
     logs["total_train_time_sec"] = training_timer.elapsed
     logs["peak_vram_mb"] = get_peak_vram_mb()
