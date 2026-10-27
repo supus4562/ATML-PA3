@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # ATML PA3 - Task 1: Large Language Model Fine-Tuning Execution Script
-# Optimized for NVIDIA RTX 6000 Pro Blackwell / Ada / Hopper Architectures
+# Optimized for NVIDIA H200 141GB / Hopper / RTX 6000 Pro Blackwell Architectures
 # ==============================================================================
 
 set -e
 
 echo "=============================================================================="
-echo " Starting ATML PA3 Task 1 Pipeline on RTX 6000 Pro Blackwell Architecture"
+echo " Starting ATML PA3 Task 1 Pipeline on NVIDIA H200 (141 GB HBM3e) / Hopper"
 echo "=============================================================================="
 
 # 1. Performance environment settings

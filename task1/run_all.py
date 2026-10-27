@@ -102,7 +102,11 @@ def main():
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - Blackwell/Ada Tensor Cores active.")
+        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - Hopper H200/Blackwell Tensor Cores active.")
+        # Hopper H200 & Blackwell performance optimizations
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
     os.makedirs(config.paths.output_dir, exist_ok=True)
     os.makedirs(config.paths.checkpoint_dir, exist_ok=True)

@@ -64,7 +64,7 @@ def run_standalone_gsm8k_eval(
     tokenizer: Any,
     test_examples: List[Dict[str, str]],
     device: torch.device,
-    batch_size: int = 16,
+    batch_size: int = 64,
     max_new_tokens: int = 1024,
 ) -> Dict[str, Any]:
     """

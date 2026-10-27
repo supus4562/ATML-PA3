@@ -145,7 +145,7 @@ evaluation:
       task: "arc_easy"
       metric: "acc_norm"
       chat_template: false
-  batch_size: 32
+  batch_size: 64
 
 # Output Directories
 paths:
