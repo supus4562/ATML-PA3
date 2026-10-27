@@ -59,10 +59,15 @@ from task1.qualitative import (
 )
 
 
-def load_fresh_qwen_model(config: Task1Config, device: torch.device) -> Tuple[nn.Module, Any]:
-    """Load a fresh copy of Qwen/Qwen3-0.6B with thinking disabled and SDPA."""
+def load_fresh_qwen_model(config: Task1Config, device: torch.device, is_adapter: bool = False) -> Tuple[nn.Module, Any]:
+    """
+    Load a fresh copy of Qwen/Qwen3-0.6B with thinking disabled and SDPA.
+    Per PDF invariant:
+    - Full FT variants use FP32 master parameters.
+    - Adapter variants use a frozen FP16 backbone and FP32 adapters.
+    """
     model_name = config.model.model_name_or_path
-    print(f"\n[Model] Loading fresh checkpoint: {model_name}...")
+    print(f"\n[Model] Loading fresh checkpoint: {model_name} (is_adapter={is_adapter})...")
 
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
@@ -71,7 +76,11 @@ def load_fresh_qwen_model(config: Task1Config, device: torch.device) -> Tuple[nn
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    torch_dtype = torch.float16 if (config.training.fp16 and device.type == "cuda") else torch.float32
+    # Invariant: Full FT variants use FP32 master parameters; adapter variants use a frozen FP16 backbone
+    if is_adapter and config.training.fp16 and device.type == "cuda":
+        torch_dtype = torch.float16
+    else:
+        torch_dtype = torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
@@ -237,7 +246,7 @@ def main():
         print("\n" + "="*80)
         print("STEP 5: LoRA AT RANK 4")
         print("="*80)
-        model, tokenizer = load_fresh_qwen_model(config, device)
+        model, tokenizer = load_fresh_qwen_model(config, device, is_adapter=True)
         lora_cfg = config.methods.get("lora_4", {})
         apply_lora_to_model(
             model,
@@ -266,7 +275,7 @@ def main():
         print("\n" + "="*80)
         print("STEP 6: LoRA AT RANK 16")
         print("="*80)
-        model, tokenizer = load_fresh_qwen_model(config, device)
+        model, tokenizer = load_fresh_qwen_model(config, device, is_adapter=True)
         lora_cfg = config.methods.get("lora_16", {})
         apply_lora_to_model(
             model,
@@ -295,7 +304,7 @@ def main():
         print("\n" + "="*80)
         print("STEP 7: OPLoRA AT RANK 16 (PROTECTION RANK 128)")
         print("="*80)
-        model, tokenizer = load_fresh_qwen_model(config, device)
+        model, tokenizer = load_fresh_qwen_model(config, device, is_adapter=True)
         oplora_cfg = config.methods.get("oplora_16", {})
         model, svd_stats = apply_oplora_to_model(
             model,

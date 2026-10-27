@@ -42,7 +42,10 @@ def load_gsm8k_test_questions(seed: int = 6304) -> Set[str]:
     normalized_gsm8k: Set[str] = set()
     try:
         from datasets import load_dataset
-        gsm8k_test = load_dataset("gsm8k", "main", split="test")
+        try:
+            gsm8k_test = load_dataset("openai/gsm8k", "main", split="test")
+        except Exception:
+            gsm8k_test = load_dataset("gsm8k", "main", split="test")
         for item in gsm8k_test:
             q = item.get("question", "")
             if q:

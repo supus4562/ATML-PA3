@@ -74,7 +74,10 @@ def sample_activation_probe_set(
     try:
         from datasets import load_dataset
         # 1. GSM8K test
-        gsm8k = load_dataset("gsm8k", "main", split="test")
+        try:
+            gsm8k = load_dataset("openai/gsm8k", "main", split="test")
+        except Exception:
+            gsm8k = load_dataset("gsm8k", "main", split="test")
         gsm8k_indices = list(range(len(gsm8k)))
         rng.shuffle(gsm8k_indices)
         selected_gsm8k = gsm8k_indices[:num_gsm8k]

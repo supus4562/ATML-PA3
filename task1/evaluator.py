@@ -239,6 +239,14 @@ def evaluate_checkpoint_condition(
     os.makedirs(output_dir, exist_ok=True)
     condition_results = {"condition": condition_name, "scores": {}, "metadata": {}}
 
+    # PDF invariant: Evaluate all models in FP16 with dropout disabled
+    model.eval()
+    if device.type == "cuda":
+        model = model.half()
+    for m in model.modules():
+        if isinstance(m, nn.Dropout):
+            m.p = 0.0
+
     has_lmeval = False
     try:
         import lm_eval
@@ -250,7 +258,7 @@ def evaluate_checkpoint_condition(
         print("[Evaluator] lm-evaluation-harness detected. Attempting native harness tasks...")
         try:
             from lm_eval.models.huggingface import HFLM
-            eval_batch_size = getattr(config.evaluation, "batch_size", 32)
+            eval_batch_size = getattr(config.evaluation, "batch_size", 64)
             lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size)
             eval_output = lm_eval.simple_evaluate(
                 model=lm_obj,
@@ -270,7 +278,10 @@ def evaluate_checkpoint_condition(
 
     # 1. GSM8K
     try:
-        gsm8k_data = load_dataset("gsm8k", "main", split="test")
+        try:
+            gsm8k_data = load_dataset("openai/gsm8k", "main", split="test")
+        except Exception:
+            gsm8k_data = load_dataset("gsm8k", "main", split="test")
         gsm8k_samples = [{"question": x["question"], "answer": x["answer"]} for x in gsm8k_data]
         gsm8k_res = run_standalone_gsm8k_eval(model, tokenizer, gsm8k_samples, device, batch_size=config.evaluation.batch_size)
         condition_results["scores"]["gsm8k"] = gsm8k_res["score"]
