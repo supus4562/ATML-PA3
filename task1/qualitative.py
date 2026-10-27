@@ -9,10 +9,12 @@ Qualitative analysis module for Task 1:
   inappropriate content, and truncation flags with short excerpts.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Tuple, Any
 import yaml
 import torch
 import torch.nn as nn
