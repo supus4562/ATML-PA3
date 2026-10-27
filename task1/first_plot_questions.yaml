@@ -1,0 +1,134 @@
+# 24 Qualitative Evaluation Prompts (8 questions x 3 formats: plain, json, template)
+# These probe instruction following, coherence, answer style, repetition,
+# and unnecessary mathematical framing on non-math topics.
+
+questions:
+  - id: 1
+    topic: "photosynthesis"
+    formats:
+      plain: "Explain the process of photosynthesis and why it is important for life on Earth."
+      json: 'Provide an explanation of photosynthesis in valid JSON format with the keys "process", "inputs", "outputs", and "importance". Do not output any text outside the JSON object.'
+      template: |
+        Answer the question about photosynthesis using exactly the following Markdown template:
+        ## Overview
+        [A brief summary of photosynthesis]
+        ## Key Stages
+        [Explanation of light-dependent and Calvin cycle stages]
+        ## Ecological Significance
+        [Why photosynthesis is crucial for the biosphere]
+
+  - id: 2
+    topic: "renewable_energy"
+    formats:
+      plain: "What are the key differences between renewable and non-renewable energy sources? Give examples of each."
+      json: 'Compare renewable and non-renewable energy sources in valid JSON format with keys "renewable_definition", "renewable_examples", "non_renewable_definition", "non_renewable_examples", and "environmental_impact". Do not include Markdown fences or extra commentary.'
+      template: |
+        Structure your comparison of energy sources using this exact template:
+        ### Definition & Characteristics
+        - Renewable: [Definition]
+        - Non-Renewable: [Definition]
+        ### Representative Examples
+        - Renewable: [Examples]
+        - Non-Renewable: [Examples]
+        ### Environmental Implications
+        [Discussion of sustainability and carbon footprint]
+
+  - id: 3
+    topic: "business_emails"
+    formats:
+      plain: "Describe three tips for writing clear, concise, and professional business emails."
+      json: 'Return three tips for business email communication in JSON format conforming to: {"tips": [{"title": string, "rationale": string, "example": string}]}.'
+      template: |
+        Provide email etiquette tips using the template below:
+        # Professional Email Guidelines
+        Tip 1: [Name]
+        * Rationale: [Why it matters]
+        * Action Item: [What to do]
+        Tip 2: [Name]
+        * Rationale: [Why it matters]
+        * Action Item: [What to do]
+        Tip 3: [Name]
+        * Rationale: [Why it matters]
+        * Action Item: [What to do]
+
+  - id: 4
+    topic: "french_revolution"
+    formats:
+      plain: "Summarize the primary causes and long-term consequences of the French Revolution."
+      json: 'Provide a historical summary of the French Revolution in valid JSON with fields: "primary_causes" (array of strings), "key_phases" (array of strings), and "long_term_consequences" (array of strings).'
+      template: |
+        Format your historical summary using this outline:
+        **1. Socioeconomic and Political Causes**
+        [List and explain causes]
+        **2. Turning Points**
+        [Key events]
+        **3. Global Legacy**
+        [Lasting impact on governance and rights]
+
+  - id: 5
+    topic: "vaccine_immunity"
+    formats:
+      plain: "How do vaccines stimulate the human immune system to build immunity against infectious pathogens?"
+      json: 'Explain vaccine mechanism in JSON format with keys "pathogen_introduction", "immune_response", "memory_cell_formation", and "future_protection". Only output JSON.'
+      template: |
+        Describe vaccine mechanism using the required structure:
+        ## Mechanism of Action
+        Step 1: Antigen Recognition
+        Step 2: Antibody and Cellular Response
+        Step 3: Immunological Memory
+        ## Protection Efficacy
+        [Summary statement]
+
+  - id: 6
+    topic: "kyoto_itinerary"
+    formats:
+      plain: "Create a balanced 3-day travel itinerary for a first-time visitor to Kyoto, Japan."
+      json: 'Output a 3-day Kyoto itinerary as a JSON object with keys "day_1", "day_2", and "day_3", each containing "morning", "afternoon", "evening", and "recommended_cuisine".'
+      template: |
+        Present the Kyoto travel itinerary using this exact Markdown schedule:
+        # Kyoto 3-Day Plan
+        ## Day 1: Historic Eastern Kyoto (Higashiyama)
+        - Morning: [Activity]
+        - Afternoon: [Activity]
+        - Evening: [Activity]
+        ## Day 2: Bamboo & Arashiyama (Western Kyoto)
+        - Morning: [Activity]
+        - Afternoon: [Activity]
+        - Evening: [Activity]
+        ## Day 3: Fushimi Inari & Southern Kyoto
+        - Morning: [Activity]
+        - Afternoon: [Activity]
+        - Evening: [Activity]
+
+  - id: 7
+    topic: "sound_waves"
+    formats:
+      plain: "Explain how sound waves travel through different mediums such as air, water, and solids, and why their speed differs."
+      json: 'Summarize acoustic wave propagation across mediums in valid JSON with keys "wave_nature", "propagation_mechanism", "medium_comparison" (object with "solids", "liquids", "gases" speeds and elastic properties).'
+      template: |
+        Format the acoustics explanation according to this layout:
+        ### Sound Propagation Principles
+        [Explanation of mechanical longitudinal waves]
+        ### Medium Comparison
+        1. Solids: [Speed and physical reason]
+        2. Liquids: [Speed and physical reason]
+        3. Gases: [Speed and physical reason]
+        ### Summary Conclusion
+        [Core takeaway]
+
+  - id: 8
+    topic: "ai_ethics"
+    formats:
+      plain: "What are the most pressing ethical considerations associated with the rapid development and deployment of artificial intelligence?"
+      json: 'List ethical issues in AI in JSON format with key "ethical_domains" mapping to an array of objects having "domain", "risk_description", and "mitigation_strategy".'
+      template: |
+        Analyze AI ethics using the following template:
+        # Ethical Framework for AI
+        ## Section A: Bias, Fairness, and Representation
+        [Analysis]
+        ## Section B: Transparency and Accountability
+        [Analysis]
+        ## Section C: Labor and Societal Impact
+        [Analysis]
+        ## Section D: Recommendations
+        [Actionable governance proposals]

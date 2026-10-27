@@ -1,0 +1,52 @@
+# Python / Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Datasets and Large Caches
+data_cache/
+*.arrow
+*.parquet
+
+# Checkpoints and Model Weights
+checkpoints/
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Assignment PDF (optional, but keep it tracked if needed or ignore large binary files)
+# ATML-PA3.pdf is tracked
