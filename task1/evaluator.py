@@ -250,11 +250,13 @@ def evaluate_checkpoint_condition(
         print("[Evaluator] lm-evaluation-harness detected. Attempting native harness tasks...")
         try:
             from lm_eval.models.huggingface import HFLM
-            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size="auto")
+            eval_batch_size = getattr(config.evaluation, "batch_size", 32)
+            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size)
             eval_output = lm_eval.simple_evaluate(
                 model=lm_obj,
                 tasks=["gsm8k_cot", "hellaswag", "boolq", "arc_easy"],
                 num_fewshot=0,
+                batch_size=eval_batch_size,
             )
             for task_name, task_metrics in eval_output.get("results", {}).items():
                 primary = task_metrics.get("acc_norm,none", task_metrics.get("acc,none", task_metrics.get("exact_match,none", 0.0)))
@@ -338,5 +340,8 @@ def evaluate_checkpoint_condition(
     with open(res_path, "w", encoding="utf-8") as f:
         json.dump(condition_results, f, indent=2)
     print(f"[Evaluator] Saved condition results to {res_path}")
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return condition_results

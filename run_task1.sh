@@ -10,8 +10,7 @@ echo "==========================================================================
 echo " Starting ATML PA3 Task 1 Pipeline on RTX 6000 Pro Blackwell Architecture"
 echo "=============================================================================="
 
-# 1. Performance environment settings for Blackwell Tensor Cores
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+# 1. Performance environment settings
 export TOKENIZERS_PARALLELISM="false"
 export PYTHONUNBUFFERED=1
 
