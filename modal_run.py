@@ -292,10 +292,9 @@ def check_environment():
     print("ALL ENVIRONMENT & HARDWARE CHECKS PASSED!\n", flush=True)
 
 
-# 5. Remote Helpers for Result File Synchronization
 @app.function(image=image, volumes={VOLUME_MOUNT_PATH: volume})
-def list_volume_artifacts() -> list:
-    """List all result and checkpoint files stored in the persistent volume."""
+def list_volume_artifacts(include_checkpoints: bool = False) -> list:
+    """List result files stored in the persistent volume (excluding heavy checkpoints by default)."""
     import os
 
     volume.reload()
@@ -304,6 +303,10 @@ def list_volume_artifacts() -> list:
         for f in files:
             full_p = os.path.join(root, f)
             rel_p = os.path.relpath(full_p, VOLUME_MOUNT_PATH)
+            # Exclude massive .pt checkpoints and data caches by default
+            if not include_checkpoints:
+                if f.endswith(".pt") or f.endswith(".bin") or "checkpoints" in rel_p or "data_cache" in rel_p:
+                    continue
             sz_mb = os.path.getsize(full_p) / (1024 * 1024)
             collected.append((rel_p, sz_mb))
     return collected
@@ -329,6 +332,7 @@ def main(
     skip_eval: bool = False,
     dry_run: bool = False,
     download: bool = False,
+    include_checkpoints: bool = False,
     dest_dir: str = ".",
 ):
     """
@@ -339,12 +343,14 @@ def main(
       --gpu: Hardware accelerator [RTX-PRO-6000, A10G, A100, L4] (Default: RTX-PRO-6000)
       --config: Path to configuration YAML (Default: configs/modal_config.yaml)
       --skip-eval: Skip benchmark evaluation (debug flag)
-      --download: Download all artifacts from cloud volume to local disk
+      --download: Download results, metrics, and logs from cloud volume to local disk (skips heavy checkpoints by default)
+      --include-checkpoints: Include heavy 6GB+ .pt checkpoints during download
       --dest-dir: Local destination directory for downloaded files (Default: .)
     """
     if download:
-        print(f"[Local CLI] Fetching artifact manifest from cloud volume 'pa3-volume'...")
-        artifacts = list_volume_artifacts.remote()
+        filter_msg = "all files (including checkpoints)" if include_checkpoints else "results, metrics, and logs only (skipping checkpoints)"
+        print(f"[Local CLI] Fetching artifact manifest from cloud volume 'pa3-volume' [{filter_msg}]...")
+        artifacts = list_volume_artifacts.remote(include_checkpoints=include_checkpoints)
         if not artifacts:
             print("[Local CLI] No files found in volume yet. Run the pipeline first!")
             return
