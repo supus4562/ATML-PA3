@@ -197,6 +197,21 @@ def run_pipeline_a100(
 
 @app.function(
     image=image,
+    gpu="RTX-PRO-6000",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_pipeline_rtx6000(
+    stage: str = "all",
+    config_path: str = "configs/modal_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run pipeline on NVIDIA RTX PRO 6000 (48GB VRAM) - matched to assignment target architecture."""
+    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA RTX PRO 6000 (48GB)")
+
+
+@app.function(
+    image=image,
     gpu="L4",
     timeout=86400,
     volumes={VOLUME_MOUNT_PATH: volume},
@@ -279,7 +294,7 @@ def fetch_volume_file(rel_path: str) -> bytes:
 @app.local_entrypoint()
 def main(
     stage: str = "all",
-    gpu: str = "A10G",
+    gpu: str = "RTX-PRO-6000",
     config: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
     dry_run: bool = False,
@@ -291,7 +306,7 @@ def main(
     Parameters:
       --dry-run: Fast container & volume test without running training
       --stage: Stage to run [all, baseline, train_full_ft, train_l2sp, train_lora4, train_lora16, train_oplora, diagnostics, qualitative, synthesize]
-      --gpu: Hardware accelerator [A10G, A100, L4] (Default: A10G)
+      --gpu: Hardware accelerator [RTX-PRO-6000, A10G, A100, L4] (Default: RTX-PRO-6000)
       --config: Path to configuration YAML (Default: configs/modal_config.yaml)
       --skip-eval: Skip benchmark evaluation (debug flag)
       --download: Download all artifacts from cloud volume to local disk
@@ -323,7 +338,9 @@ def main(
     gpu_choice = gpu.upper()
     print(f"[Local CLI] Dispatching Task 1 to Modal Cloud GPU: {gpu_choice} | Stage: {stage}")
 
-    if "A100" in gpu_choice:
+    if "6000" in gpu_choice or "RTX" in gpu_choice:
+        run_pipeline_rtx6000.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+    elif "A100" in gpu_choice:
         run_pipeline_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
     elif "L4" in gpu_choice:
         run_pipeline_l4.remote(stage=stage, config_path=config, skip_eval=skip_eval)
