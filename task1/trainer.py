@@ -279,6 +279,7 @@ def train_variant(
 
                     total_sft_loss_val += mb_scaled_loss.item()
                     scaler.scale(mb_scaled_loss).backward()
+                    del outputs, sum_loss, mb_scaled_loss, input_ids, labels, attention_mask
 
                 # Free microbatch buffer immediately
                 microbatch_buffer.clear()
@@ -325,6 +326,8 @@ def train_variant(
                 logs["history"].append(step_log)
 
                 if current_update == 1 or current_update % 25 == 0 or current_update in config.training.checkpoint_updates:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     now = time.time()
                     dt = now - last_print_time
                     d_steps = max(1, current_update - last_print_update)
