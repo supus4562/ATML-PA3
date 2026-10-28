@@ -19,6 +19,12 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 if command -v nvidia-smi &> /dev/null; then
     echo "[Info] Detected GPU Hardware:"
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+    GPU_COUNT=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+    if [ "$GPU_COUNT" -ge 2 ]; then
+        echo "[Info] Dual-GPU acceleration active ($GPU_COUNT GPUs available): parallel variant training & evaluation enabled."
+    else
+        echo "[Info] Single GPU active ($GPU_COUNT GPU available): sequential execution mode."
+    fi
 else
     echo "[Warning] nvidia-smi not found. Verifying PyTorch CUDA..."
 fi

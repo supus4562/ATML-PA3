@@ -12,6 +12,7 @@ Unified training engine for Task 1:
   * Recovery checkpoints at updates 312, 625, 937, 1250 with full state preservation.
 """
 
+import json
 import math
 import os
 import random
@@ -367,5 +368,23 @@ def train_variant(
     logs["total_train_time_sec"] = training_timer.elapsed
     logs["peak_vram_mb"] = get_peak_vram_mb()
     print(f"[{variant_name}] Training finished: {logs['total_train_time_sec']:.2f}s | Peak VRAM: {logs['peak_vram_mb']:.2f} MB")
+
+    summary_file = os.path.join(ckpt_save_dir, "training_summary.json")
+    try:
+        with open(summary_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "variant": variant_name,
+                "trainable_params": logs["trainable_params"],
+                "total_params": logs["total_params"],
+                "total_train_time_sec": logs["total_train_time_sec"],
+                "peak_vram_mb": logs["peak_vram_mb"],
+                "checkpoints": logs["checkpoints"],
+                "displacements": logs["displacements"],
+                "skipped_updates": logs.get("skipped_updates", 0),
+                "history": logs["history"],
+            }, f, indent=2)
+        print(f"[{variant_name}] Saved training summary to {summary_file}")
+    except Exception as e:
+        print(f"[Warning] Failed to write training summary {summary_file}: {e}")
 
     return logs

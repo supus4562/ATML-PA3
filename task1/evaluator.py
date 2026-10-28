@@ -12,9 +12,11 @@ Evaluation engine for Task 1:
   * Reports percentage-point changes relative to baseline.
 """
 
+import copy
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
@@ -60,19 +62,16 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     return None
 
 
-def run_standalone_gsm8k_eval(
+def _single_device_gsm8k_eval(
     model: nn.Module,
     tokenizer: Any,
     test_examples: List[Dict[str, str]],
     device: torch.device,
     batch_size: int = 64,
     max_new_tokens: int = 1024,
+    tag: str = "",
 ) -> Dict[str, Any]:
-    """
-    High-throughput standalone GSM8K evaluation matching lm-eval gsm8k_cot specifications.
-    Uses non-thinking chat template, greedy decoding, 1024 new tokens, flexible extraction.
-    Uses left-padding for causal decoder-only batched generation.
-    """
+    """Single-device GSM8K evaluation worker."""
     model.eval()
     if hasattr(model, "config"):
         model.config.use_cache = True
@@ -89,9 +88,9 @@ def run_standalone_gsm8k_eval(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Optimized generation batch size for RTX 6000 Pro (48GB VRAM)
     actual_batch_size = min(batch_size, 64) if device.type == "cuda" else batch_size
-    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded, KV-cached)...")
+    prefix = f"{tag} " if tag else ""
+    print(f"{prefix}[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded, KV-cached)...")
 
     try:
         for i in range(0, total_count, actual_batch_size):
@@ -159,7 +158,7 @@ def run_standalone_gsm8k_eval(
                 })
 
             if (i + actual_batch_size) % 200 == 0 or (i + actual_batch_size) >= total_count:
-                print(f"  Processed {min(i + actual_batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + actual_batch_size, total_count)} ({correct_count/min(i + actual_batch_size, total_count)*100:.2f}%)")
+                print(f"  {prefix}Processed {min(i + actual_batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + actual_batch_size, total_count)} ({correct_count/min(i + actual_batch_size, total_count)*100:.2f}%)")
     finally:
         tokenizer.padding_side = orig_padding_side
         tokenizer.pad_token_id = orig_pad_token_id
@@ -178,25 +177,85 @@ def run_standalone_gsm8k_eval(
     }
 
 
-def run_standalone_likelihood_eval(
+def run_standalone_gsm8k_eval(
+    model: nn.Module,
+    tokenizer: Any,
+    test_examples: List[Dict[str, str]],
+    device: torch.device,
+    batch_size: int = 64,
+    max_new_tokens: int = 1024,
+) -> Dict[str, Any]:
+    """
+    High-throughput standalone GSM8K evaluation matching lm-eval gsm8k_cot specifications.
+    Uses non-thinking chat template, greedy decoding, 1024 new tokens, flexible extraction.
+    Automatically leverages dual GPUs (cuda:0 & cuda:1) when available.
+    """
+    can_use_dual_gpu = (
+        device.type == "cuda"
+        and device.index is None
+        and torch.cuda.device_count() >= 2
+        and len(test_examples) >= 4
+    )
+
+    if can_use_dual_gpu:
+        dev0 = torch.device("cuda:0")
+        dev1 = torch.device("cuda:1")
+        n = len(test_examples)
+        mid = n // 2
+        half0 = test_examples[:mid]
+        half1 = test_examples[mid:]
+
+        print(f"[Eval-GSM8K] Dual-GPU mode active: splitting {n} examples across {dev0} ({len(half0)}) and {dev1} ({len(half1)})...")
+        model_dev0 = model.to(dev0)
+        model_dev1 = copy.deepcopy(model).to(dev1)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut0 = executor.submit(_single_device_gsm8k_eval, model_dev0, tokenizer, half0, dev0, batch_size, max_new_tokens, "[GPU 0]")
+            fut1 = executor.submit(_single_device_gsm8k_eval, model_dev1, tokenizer, half1, dev1, batch_size, max_new_tokens, "[GPU 1]")
+            res0 = fut0.result()
+            res1 = fut1.result()
+
+        del model_dev1
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        combined_details = res0["details"] + res1["details"]
+        correct = res0["correct"] + res1["correct"]
+        total = res0["total"] + res1["total"]
+        unextractable = res0["unextractable"] + res1["unextractable"]
+        truncated = res0["truncated"] + res1["truncated"]
+        score = (correct / max(1, total)) * 100.0
+
+        return {
+            "metric": "exact_match",
+            "score": float(score),
+            "correct": correct,
+            "total": total,
+            "unextractable": unextractable,
+            "truncated": truncated,
+            "details": combined_details,
+        }
+    else:
+        return _single_device_gsm8k_eval(model, tokenizer, test_examples, device, batch_size, max_new_tokens)
+
+
+def _single_device_likelihood_eval(
     model: nn.Module,
     tokenizer: Any,
     dataset_name: str,
     examples: List[Dict[str, Any]],
     device: torch.device,
     batch_size: int = 16,
+    tag: str = "",
 ) -> Dict[str, Any]:
-    """
-    Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
-    Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
-    Uses memory-efficient fused cross-entropy to avoid allocating multi-gigabyte log-softmax tensors.
-    """
+    """Single-device batched candidate likelihood scoring worker."""
     model.eval()
     correct_raw = 0
     correct_norm = 0
     total = len(examples)
 
-    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood (batch size {batch_size})...")
+    prefix = f"{tag} " if tag else ""
+    print(f"{prefix}[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood (batch size {batch_size})...")
 
     flat_candidates = []
     for ex_idx, item in enumerate(examples):
@@ -266,7 +325,7 @@ def run_standalone_likelihood_eval(
 
         if (i + batch_size) % (batch_size * 100) == 0 or (i + batch_size) >= len(flat_candidates):
             pct = min(100.0, (i + batch_size) / len(flat_candidates) * 100.0)
-            print(f"  Processed {min(i + batch_size, len(flat_candidates))}/{len(flat_candidates)} candidates ({pct:.1f}%)...")
+            print(f"  {prefix}Processed {min(i + batch_size, len(flat_candidates))}/{len(flat_candidates)} candidates ({pct:.1f}%)...")
 
     for ex_idx, item in enumerate(examples):
         gold_idx = item.get("gold_index", 0)
@@ -291,6 +350,65 @@ def run_standalone_likelihood_eval(
         "correct_norm": correct_norm,
         "total": total,
     }
+
+
+def run_standalone_likelihood_eval(
+    model: nn.Module,
+    tokenizer: Any,
+    dataset_name: str,
+    examples: List[Dict[str, Any]],
+    device: torch.device,
+    batch_size: int = 16,
+) -> Dict[str, Any]:
+    """
+    Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
+    Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
+    Automatically leverages dual GPUs (cuda:0 & cuda:1) when available.
+    """
+    can_use_dual_gpu = (
+        device.type == "cuda"
+        and device.index is None
+        and torch.cuda.device_count() >= 2
+        and len(examples) >= 4
+    )
+
+    if can_use_dual_gpu:
+        dev0 = torch.device("cuda:0")
+        dev1 = torch.device("cuda:1")
+        n = len(examples)
+        mid = n // 2
+        half0 = examples[:mid]
+        half1 = examples[mid:]
+
+        print(f"[Eval-{dataset_name.upper()}] Dual-GPU mode active: splitting {n} examples across {dev0} ({len(half0)}) and {dev1} ({len(half1)})...")
+        model_dev0 = model.to(dev0)
+        model_dev1 = copy.deepcopy(model).to(dev1)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut0 = executor.submit(_single_device_likelihood_eval, model_dev0, tokenizer, dataset_name, half0, dev0, batch_size, "[GPU 0]")
+            fut1 = executor.submit(_single_device_likelihood_eval, model_dev1, tokenizer, dataset_name, half1, dev1, batch_size, "[GPU 1]")
+            res0 = fut0.result()
+            res1 = fut1.result()
+
+        del model_dev1
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        correct_raw = res0["correct_raw"] + res1["correct_raw"]
+        correct_norm = res0["correct_norm"] + res1["correct_norm"]
+        total = res0["total"] + res1["total"]
+        acc_raw = (correct_raw / max(1, total)) * 100.0
+        acc_norm = (correct_norm / max(1, total)) * 100.0
+
+        return {
+            "acc": float(acc_raw),
+            "acc_norm": float(acc_norm),
+            "correct_raw": correct_raw,
+            "correct_norm": correct_norm,
+            "total": total,
+        }
+    else:
+        return _single_device_likelihood_eval(model, tokenizer, dataset_name, examples, device, batch_size)
 
 
 def evaluate_checkpoint_condition(
