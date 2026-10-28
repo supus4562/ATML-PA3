@@ -275,7 +275,7 @@ def fetch_volume_file(rel_path: str) -> bytes:
         return f.read()
 
 
-# 6. Local Entrypoint: CLI Interface
+# 6. Single Local Entrypoint: CLI Interface
 @app.local_entrypoint()
 def main(
     stage: str = "all",
@@ -283,16 +283,38 @@ def main(
     config: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
     dry_run: bool = False,
+    download: bool = False,
+    dest_dir: str = ".",
 ):
     """
     Main entrypoint when running `modal run modal_run.py`.
     Parameters:
+      --dry-run: Fast container & volume test without running training
       --stage: Stage to run [all, baseline, train_full_ft, train_l2sp, train_lora4, train_lora16, train_oplora, diagnostics, qualitative, synthesize]
       --gpu: Hardware accelerator [A10G, A100, L4] (Default: A10G)
       --config: Path to configuration YAML (Default: configs/modal_config.yaml)
       --skip-eval: Skip benchmark evaluation (debug flag)
-      --dry-run: Fast container & volume test without running training
+      --download: Download all artifacts from cloud volume to local disk
+      --dest-dir: Local destination directory for downloaded files (Default: .)
     """
+    if download:
+        print(f"[Local CLI] Fetching artifact manifest from cloud volume 'pa3-volume'...")
+        artifacts = list_volume_artifacts.remote()
+        if not artifacts:
+            print("[Local CLI] No files found in volume yet. Run the pipeline first!")
+            return
+        print(f"[Local CLI] Found {len(artifacts)} files in volume. Commencing download to '{dest_dir}':")
+        for rel_path, sz_mb in artifacts:
+            target_path = os.path.join(dest_dir, rel_path)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            print(f"  -> [{sz_mb:6.2f} MB] {rel_path} ...", end=" ", flush=True)
+            data = fetch_volume_file.remote(rel_path)
+            with open(target_path, "wb") as f_out:
+                f_out.write(data)
+            print("Done!")
+        print(f"\n[Local CLI] Successfully downloaded all artifacts to '{dest_dir}'!")
+        return
+
     if dry_run:
         print("[Local CLI] Executing fast dry-run environment check...")
         check_environment.remote()
@@ -308,31 +330,3 @@ def main(
     else:
         run_pipeline_a10g.remote(stage=stage, config_path=config, skip_eval=skip_eval)
 
-
-@app.local_entrypoint()
-def download_results(dest_dir: str = "."):
-    """
-    Download all metrics, qualitative responses, summaries, and plots from cloud volume to local disk.
-    Usage:
-      modal run modal_run.py::download_results
-    """
-    import os
-
-    print(f"[Local CLI] Fetching artifact manifest from cloud volume 'pa3-volume'...")
-    artifacts = list_volume_artifacts.remote()
-
-    if not artifacts:
-        print("[Local CLI] No files found in volume yet. Run the pipeline first!")
-        return
-
-    print(f"[Local CLI] Found {len(artifacts)} files in volume. Commencing download to '{dest_dir}':")
-    for rel_path, sz_mb in artifacts:
-        target_path = os.path.join(dest_dir, rel_path)
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        print(f"  -> [{sz_mb:6.2f} MB] {rel_path} ...", end=" ", flush=True)
-        data = fetch_volume_file.remote(rel_path)
-        with open(target_path, "wb") as f_out:
-            f_out.write(data)
-        print("Done!")
-
-    print(f"\n[Local CLI] Successfully downloaded all artifacts to '{dest_dir}'!")
