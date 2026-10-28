@@ -206,8 +206,38 @@ def run_pipeline_rtx6000(
     config_path: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
 ):
-    """Run pipeline on NVIDIA RTX PRO 6000 (48GB VRAM) - matched to assignment target architecture."""
+    """Run pipeline on NVIDIA RTX PRO 6000 Ada (48GB VRAM)."""
     _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA RTX PRO 6000 (48GB)")
+
+
+@app.function(
+    image=image,
+    gpu="RTX-PRO-6000:2",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_pipeline_rtx6000_x2(
+    stage: str = "all",
+    config_path: str = "configs/modal_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run pipeline on Dual NVIDIA RTX PRO 6000 Ada (96GB VRAM total)."""
+    _execute_pipeline_in_container(stage, config_path, skip_eval, "Dual NVIDIA RTX PRO 6000 (96GB)")
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_pipeline_h100(
+    stage: str = "all",
+    config_path: str = "configs/modal_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run pipeline on NVIDIA H100 (80GB VRAM)."""
+    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA H100 (80GB)")
 
 
 @app.function(
@@ -338,7 +368,11 @@ def main(
     gpu_choice = gpu.upper()
     print(f"[Local CLI] Dispatching Task 1 to Modal Cloud GPU: {gpu_choice} | Stage: {stage}")
 
-    if "6000" in gpu_choice or "RTX" in gpu_choice:
+    if "6000:2" in gpu_choice or "90" in gpu_choice or "96" in gpu_choice or "DUAL" in gpu_choice:
+        run_pipeline_rtx6000_x2.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+    elif "H100" in gpu_choice:
+        run_pipeline_h100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+    elif "6000" in gpu_choice or "RTX" in gpu_choice:
         run_pipeline_rtx6000.remote(stage=stage, config_path=config, skip_eval=skip_eval)
     elif "A100" in gpu_choice:
         run_pipeline_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)

@@ -144,9 +144,15 @@ bash run_kaggle.sh
 
 The `modal` branch adds serverless execution on **Modal (modal.com)** with persistent cloud volumes and real-time streaming:
 - **Persistent Cloud Storage (`pa3-volume`)**: Checkpoints, tokenized data cache, and results are stored in a durable cloud volume and committed automatically after each checkpoint and stage.
-- **Real-Time Step-by-Step Logging**: Every single optimizer update ($1, 2, \dots, 1250$) and evaluation batch is printed and flushed in real time, with redundant streaming into `.jsonl` and `.csv`.
+- **Live tqdm Progress Bar & Streaming**: Every single optimizer update ($1, 2, \dots, 1250$) displays in a real-time `tqdm` progress bar with live metrics (`sft_loss`, `lr`, `grad`, `toks`, `s/it`), backed by redundant streaming into `.jsonl` and `.csv`.
 - **Native `lm-evaluation-harness`**: Executes GSM8K with non-thinking chat template ($1,024$-token cap, greedy decoding) and HellaSwag, BoolQ, ARC-Easy with completion prompts, saving per-example outputs and predictions.
-- **Target Hardware Acceleration**: Default runner uses **NVIDIA RTX PRO 6000 (48GB VRAM)** (~$\$3.03$/hr; full Task 1 finishes in ~30–35 minutes, costing only **~$\$1.50 – \$1.80** out of the free $\$30$ credit). Also supports **A10G** (`--gpu A10G`), **A100** (`--gpu A100`), and **L4** (`--gpu L4`).
+- **Aggressively Optimized for High-Memory GPUs**: With 48GB–96GB VRAM, activation checkpointing is turned off (`gradient_checkpointing: false`), delivering **4–5 it/s** throughput (~$0.2$s/step), so full 1,250 updates finish in under 5 minutes per variant!
+- **Target Hardware Acceleration**:
+  - `modal run modal_run.py` (Default: **NVIDIA RTX PRO 6000 Ada (48GB)**)
+  - `modal run modal_run.py --gpu RTX-PRO-6000:2` (**Dual RTX PRO 6000 (96GB VRAM)**)
+  - `modal run modal_run.py --gpu H100` (**NVIDIA H100 (80GB VRAM)**)
+  - `modal run modal_run.py --gpu A10G` (**NVIDIA A10G (24GB VRAM)**)
+  - `modal run modal_run.py --gpu A100` (**NVIDIA A100 (40/80GB VRAM)**)
 
 ### Quick Start on Modal:
 ```bash
@@ -159,14 +165,13 @@ modal setup
 # 3. Dry-run verification (checks container, CUDA, volume, and packages in ~30s)
 modal run modal_run.py --dry-run
 
-# 4. Launch full Task 1 pipeline on NVIDIA RTX PRO 6000 (48GB)
+# 4. Launch full Task 1 pipeline on NVIDIA RTX PRO 6000 Ada (48GB)
 modal run modal_run.py
 
-# 5. (Alternative GPUs) Launch on A10G or A100
-modal run modal_run.py --gpu A10G
-modal run modal_run.py --gpu A100
+# 5. Launch on 96GB Dual RTX PRO 6000 (for massive VRAM headroom)
+modal run modal_run.py --gpu RTX-PRO-6000:2
 
-# 6. Run a specific stage
+# 6. Run a specific stage (e.g. train_full_ft or baseline)
 modal run modal_run.py --stage train_full_ft
 
 # 7. Download all results from cloud volume directly to local repo

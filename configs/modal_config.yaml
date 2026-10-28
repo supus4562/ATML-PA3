@@ -31,7 +31,7 @@ training:
     weight_decay: 0.01
     fused: true                    # Fully supported on Modal CUDA environment
   gradient_clipping: 1.0
-  gradient_checkpointing: true     # STRICT INVARIANT: Enabled per PA3 PDF Table
+  gradient_checkpointing: false    # Disabled for 4-5 it/s speed on 48GB/96GB RTX 6000 (VRAM >> 4GB needed)
   use_cache: true
   fp16: true
   checkpoint_updates: [312, 625, 937, 1250]

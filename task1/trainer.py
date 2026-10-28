@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from task1.utils import (
     CUDATimer,
@@ -250,6 +251,17 @@ def train_variant(
     last_print_time = time.time()
     last_print_update = current_update
 
+    # Initialize tqdm progress bar for real-time visual progress
+    pbar = tqdm(
+        total=target_updates,
+        initial=start_update,
+        desc=f"[{variant_name.upper()}]",
+        unit="step",
+        dynamic_ncols=True,
+        file=sys.stdout,
+        mininterval=0.0,
+    )
+
     with training_timer:
         for batch_idx, batch in enumerate(data_loader):
             if batch_idx < start_batch_idx:
@@ -341,14 +353,16 @@ def train_variant(
                 step_log["sec_per_step"] = float(sec_per_step)
                 logs["history"].append(step_log)
 
-                # Output EVERY single step per PA requirements (flushed immediately)
-                print(
-                    f"[{variant_name}] Update {current_update:4d}/{target_updates} | "
-                    f"SFT Loss: {total_sft_loss_val:.4f} | Total Loss: {total_loss_val:.4f} | "
-                    f"LR: {current_lr:.2e} | Grad Norm: {step_log['grad_norm']:.2f} | "
-                    f"Tokens: {accum_tokens:4d} | Speed: {sec_per_step:.2f}s/step",
-                    flush=True,
-                )
+                # Update tqdm progress bar on every single step
+                pbar.update(1)
+                pbar.set_postfix({
+                    "sft_loss": f"{total_sft_loss_val:.4f}",
+                    "lr": f"{current_lr:.2e}",
+                    "grad": f"{step_log['grad_norm']:.2f}",
+                    "toks": accum_tokens,
+                    "s/it": f"{sec_per_step:.2f}",
+                })
+                sys.stdout.flush()
 
                 # Redundant streaming persistence on every single update
                 try:
@@ -365,7 +379,7 @@ def train_variant(
                         f_c.flush()
                         os.fsync(f_c.fileno())
                 except Exception as log_err:
-                    print(f"[{variant_name}] Warning: Failed to append to live log files: {log_err}", flush=True)
+                    pbar.write(f"[{variant_name}] Warning: Failed to append to live log files: {log_err}")
 
                 # Checkpoint saving schedule: 312, 625, 937, 1250
                 if current_update in config.training.checkpoint_updates:
@@ -387,7 +401,7 @@ def train_variant(
                         "path": ckpt_file,
                         "size_mb": ckpt_size,
                     }
-                    print(f"[{variant_name}] Saved recovery checkpoint at update {current_update} ({ckpt_size:.2f} MB)", flush=True)
+                    pbar.write(f"[{variant_name}] Saved recovery checkpoint at update {current_update} ({ckpt_size:.2f} MB)")
 
                     # Full-model displacement recording
                     if variant_name in ["full_ft", "full_ft_l2sp"] and theta_0 is not None:
@@ -395,7 +409,7 @@ def train_variant(
                            (variant_name == "full_ft_l2sp" and current_update == 1250):
                             disp = compute_parameter_displacement(model, theta_0)
                             logs["displacements"][str(current_update)] = disp
-                            print(f"[{variant_name}] ||theta - theta_0||_2 at update {current_update}: {disp:.6f}", flush=True)
+                            pbar.write(f"[{variant_name}] ||theta - theta_0||_2 at update {current_update}: {disp:.6f}")
 
                     # Periodically save training summary so checkpoint state is never lost
                     partial_summary_file = os.path.join(ckpt_save_dir, "training_summary.json")
@@ -422,7 +436,9 @@ def train_variant(
                         try:
                             checkpoint_callback(current_update, ckpt_file)
                         except Exception as cb_err:
-                            print(f"[{variant_name}] Warning: checkpoint callback error: {cb_err}", flush=True)
+                            pbar.write(f"[{variant_name}] Warning: checkpoint callback error: {cb_err}")
+
+    pbar.close()
 
     logs["total_train_time_sec"] = training_timer.elapsed
     logs["peak_vram_mb"] = get_peak_vram_mb()
