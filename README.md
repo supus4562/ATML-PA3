@@ -146,7 +146,7 @@ The `modal` branch adds serverless execution on **Modal (modal.com)** with persi
 - **Persistent Cloud Storage (`pa3-volume`)**: Checkpoints, tokenized data cache, and results are stored in a durable cloud volume and committed automatically after each checkpoint and stage.
 - **Real-Time Step-by-Step Logging**: Every single optimizer update ($1, 2, \dots, 1250$) and evaluation batch is printed and flushed in real time, with redundant streaming into `.jsonl` and `.csv`.
 - **Native `lm-evaluation-harness`**: Executes GSM8K with non-thinking chat template ($1,024$-token cap, greedy decoding) and HellaSwag, BoolQ, ARC-Easy with completion prompts, saving per-example outputs and predictions.
-- **Cost-Efficient Acceleration**: Default runner uses **NVIDIA A10G** (~$\$1.10$/hr; entire Task 1 finishes in ~$\$1.65 - \$2.20$, well within the free $\$30$ credit). Also supports **NVIDIA A100** (`--gpu A100`) and **L4** (`--gpu L4`).
+- **Target Hardware Acceleration**: Default runner uses **NVIDIA RTX PRO 6000 (48GB VRAM)** (~$\$3.03$/hr; full Task 1 finishes in ~30–35 minutes, costing only **~$\$1.50 – \$1.80** out of the free $\$30$ credit). Also supports **A10G** (`--gpu A10G`), **A100** (`--gpu A100`), and **L4** (`--gpu L4`).
 
 ### Quick Start on Modal:
 ```bash
@@ -159,10 +159,11 @@ modal setup
 # 3. Dry-run verification (checks container, CUDA, volume, and packages in ~30s)
 modal run modal_run.py --dry-run
 
-# 4. Launch full Task 1 pipeline on NVIDIA A10G
+# 4. Launch full Task 1 pipeline on NVIDIA RTX PRO 6000 (48GB)
 modal run modal_run.py
 
-# 5. (Alternative) Launch on NVIDIA A100
+# 5. (Alternative GPUs) Launch on A10G or A100
+modal run modal_run.py --gpu A10G
 modal run modal_run.py --gpu A100
 
 # 6. Run a specific stage
