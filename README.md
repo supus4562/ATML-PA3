@@ -113,7 +113,34 @@ Available stages:
 
 ---
 
-## 5. Output Deliverables in `results/task1/`
+## 5. Execution Guide for Kaggle (NVIDIA Tesla T4 / P100 16GB)
+
+The `kaggle-gpu` branch incorporates specialized memory optimizations to run flawlessly within **16 GB VRAM**:
+- **Sequential Model Offloading**: Inactive models are offloaded to CPU with explicit CUDA cache clearing so only a single model resides on GPU at any given moment.
+- **Fused F.cross_entropy Scoring**: Replaces explicit `log_softmax` matrix generation during likelihood evaluation, saving 10–20 GB of intermediate tensor allocations.
+- **Tuned Batch Sizes**: Evaluation batch size calibrated to 16 for safe, fast completion.
+- **Adaptive Workers**: DataLoader concurrency adapted to Kaggle's `/dev/shm` shared memory boundaries.
+
+### Option A: Using the Interactive Jupyter Notebook
+Open and run [`kaggle_task1.ipynb`](file:///home/supus/Projects/ATML/ATML-PA3/kaggle_task1.ipynb) directly in Kaggle:
+1. Upload `kaggle_task1.ipynb` to Kaggle Notebooks.
+2. Select **Settings** $\to$ **Accelerator** $\to$ **GPU T4 x 2** or **GPU P100**.
+3. Toggle **Internet** $\to$ **On**.
+4. Run all cells.
+
+### Option B: Using the Command Line / Terminal on Kaggle
+```bash
+# Clone the kaggle-gpu branch
+git clone -b kaggle-gpu https://github.com/supus4562/ATML-PA3.git
+cd ATML-PA3
+
+# Run the complete pipeline
+bash run_kaggle.sh
+```
+
+---
+
+## 6. Output Deliverables in `results/task1/`
 
 Upon completion, all required evidence is automatically generated in `results/task1/`:
 - `metrics_summary.json`: Benchmark scores across all 7 evaluation conditions and primary score changes from baseline in percentage points.

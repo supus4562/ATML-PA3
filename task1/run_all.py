@@ -119,13 +119,12 @@ def main():
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - RTX 6000 Pro (Ada/Blackwell) Tensor Cores active.")
-        # RTX 6000 Pro (Ada Lovelace & Blackwell) high-throughput performance optimizations
+        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+        # Performance optimizations
         if hasattr(torch, "set_float32_matmul_precision"):
             torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = True
         if hasattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction"):
             torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
@@ -198,6 +197,9 @@ def main():
             mod = base_model.model.layers[l].mlp.down_proj
             baseline_W0[l] = mod.weight.detach().cpu().float().clone()
 
+        base_model.cpu()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         models_for_qualitative["baseline"] = (base_model, tokenizer)
 
     # 3. Stage: Full FT
@@ -224,12 +226,18 @@ def main():
             mid_model.load_state_dict(mid_payload["model_state_dict"])
             mid_eval = evaluate_checkpoint_condition(mid_model, tokenizer, "full_ft_midpoint", device, config, config.paths.output_dir)
             all_eval_results["full_ft_midpoint"] = mid_eval["scores"]
+            mid_model.cpu()
             models_for_qualitative["full_ft_midpoint"] = (mid_model, tokenizer)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if not args.skip_eval:
             final_eval = evaluate_checkpoint_condition(model, tokenizer, "full_ft_final", device, config, config.paths.output_dir)
             all_eval_results["full_ft_final"] = final_eval["scores"]
+        model.cpu()
         models_for_qualitative["full_ft_final"] = (model, tokenizer)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 4. Stage: Full FT + L2-SP
     if run_all or "train_l2sp" in args.stages:
@@ -251,7 +259,10 @@ def main():
         if not args.skip_eval:
             final_eval = evaluate_checkpoint_condition(model, tokenizer, "full_ft_l2sp_final", device, config, config.paths.output_dir)
             all_eval_results["full_ft_l2sp_final"] = final_eval["scores"]
+        model.cpu()
         models_for_qualitative["full_ft_l2sp_final"] = (model, tokenizer)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 5. Stage: LoRA-4
     if run_all or "train_lora4" in args.stages:
@@ -277,10 +288,16 @@ def main():
             "checkpoint_size_mb": logs["checkpoints"].get("1250", {}).get("size_mb", 0.0),
         }
         merged_model = merge_adapters_into_backbone(copy.deepcopy(model), verify_logits_parity=True)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if not args.skip_eval:
             final_eval = evaluate_checkpoint_condition(merged_model, tokenizer, "lora_4_final", device, config, config.paths.output_dir)
             all_eval_results["lora_4_final"] = final_eval["scores"]
+        merged_model.cpu()
         models_for_qualitative["lora_4_final"] = (merged_model, tokenizer)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 6. Stage: LoRA-16
     if run_all or "train_lora16" in args.stages:
@@ -306,10 +323,16 @@ def main():
             "checkpoint_size_mb": logs["checkpoints"].get("1250", {}).get("size_mb", 0.0),
         }
         merged_model = merge_adapters_into_backbone(copy.deepcopy(model), verify_logits_parity=True)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if not args.skip_eval:
             final_eval = evaluate_checkpoint_condition(merged_model, tokenizer, "lora_16_final", device, config, config.paths.output_dir)
             all_eval_results["lora_16_final"] = final_eval["scores"]
+        merged_model.cpu()
         models_for_qualitative["lora_16_final"] = (merged_model, tokenizer)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 7. Stage: OPLoRA-16
     if run_all or "train_oplora" in args.stages:
@@ -339,10 +362,16 @@ def main():
             "basis_storage_mb": svd_stats["basis_storage_mb"],
         }
         merged_model = merge_adapters_into_backbone(copy.deepcopy(model), verify_logits_parity=True)
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if not args.skip_eval:
             final_eval = evaluate_checkpoint_condition(merged_model, tokenizer, "oplora_16_final", device, config, config.paths.output_dir)
             all_eval_results["oplora_16_final"] = final_eval["scores"]
+        merged_model.cpu()
         models_for_qualitative["oplora_16_final"] = (merged_model, tokenizer)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # 8. Stage: Diagnostics (Weight-space & Activation)
     if run_all or "diagnostics" in args.stages:
@@ -393,6 +422,7 @@ def main():
             max_new_tokens=config.qualitative.max_new_tokens,
             output_json_path=os.path.join(config.paths.output_dir, "qualitative_responses.json"),
             annotation_md_path=os.path.join(config.paths.output_dir, "qualitative_annotations.md"),
+            device=device,
         )
 
     # 10. Stage: Synthesis & Consolidated Reporting

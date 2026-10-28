@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def extract_gsm8k_answer(text: str) -> Optional[str]:
@@ -183,19 +184,19 @@ def run_standalone_likelihood_eval(
     dataset_name: str,
     examples: List[Dict[str, Any]],
     device: torch.device,
-    batch_size: int = 64,
+    batch_size: int = 16,
 ) -> Dict[str, Any]:
     """
     Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
     Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
-    Processes candidates in vectorized batches for high throughput (~15s per benchmark on A100).
+    Uses memory-efficient fused cross-entropy to avoid allocating multi-gigabyte log-softmax tensors.
     """
     model.eval()
     correct_raw = 0
     correct_norm = 0
     total = len(examples)
 
-    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood...")
+    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood (batch size {batch_size})...")
 
     flat_candidates = []
     for ex_idx, item in enumerate(examples):
@@ -241,10 +242,16 @@ def run_standalone_likelihood_eval(
         with torch.inference_mode():
             outputs = model(input_ids=input_tensor, attention_mask=attn_tensor)
             logits = outputs.logits
-            shift_logits = logits[:, :-1, :]
-            shift_labels = input_tensor[:, 1:]
-            log_probs = torch.log_softmax(shift_logits, dim=-1)
-            token_logps = torch.gather(log_probs, 2, shift_labels.unsqueeze(-1)).squeeze(-1)
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = input_tensor[:, 1:].contiguous()
+            # Fused cross entropy computes -log P(target) directly without materializing
+            # a massive [batch, seq_len, 151936] log_softmax tensor (saving 10-20 GB VRAM)
+            neg_log_probs = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="none",
+            ).view(shift_labels.size())
+            token_logps = -neg_log_probs
 
         for k, c in enumerate(chunk):
             valid_len = len(c["full_ids"])
@@ -337,6 +344,7 @@ def evaluate_checkpoint_condition(
 
     print("[Evaluator] Running internal standalone evaluator...")
     from datasets import load_dataset
+    eval_batch_size = getattr(config.evaluation, "batch_size", 16)
 
     # 1. GSM8K
     try:
@@ -345,7 +353,7 @@ def evaluate_checkpoint_condition(
         except Exception:
             gsm8k_data = load_dataset("gsm8k", "main", split="test")
         gsm8k_samples = [{"question": x["question"], "answer": x["answer"]} for x in gsm8k_data]
-        gsm8k_res = run_standalone_gsm8k_eval(model, tokenizer, gsm8k_samples, device, batch_size=config.evaluation.batch_size)
+        gsm8k_res = run_standalone_gsm8k_eval(model, tokenizer, gsm8k_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["gsm8k"] = gsm8k_res["score"]
         condition_results["metadata"]["gsm8k"] = {
             "unextractable": gsm8k_res["unextractable"],
@@ -358,6 +366,9 @@ def evaluate_checkpoint_condition(
         print(f"[Warning] Failed GSM8K eval: {e}")
         condition_results["scores"]["gsm8k"] = 0.0
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # 2. HellaSwag
     try:
         hs_data = load_dataset("hellaswag", split="validation")
@@ -368,12 +379,15 @@ def evaluate_checkpoint_condition(
                 "choices": x["endings"],
                 "gold_index": int(x["label"]),
             })
-        hs_res = run_standalone_likelihood_eval(model, tokenizer, "hellaswag", hs_samples, device)
+        hs_res = run_standalone_likelihood_eval(model, tokenizer, "hellaswag", hs_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["hellaswag"] = hs_res["acc_norm"]
         condition_results["scores"]["hellaswag_raw"] = hs_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed HellaSwag eval: {e}")
         condition_results["scores"]["hellaswag"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # 3. BoolQ
     try:
@@ -385,11 +399,14 @@ def evaluate_checkpoint_condition(
                 "choices": ["false", "true"],
                 "gold_index": 1 if x["answer"] else 0,
             })
-        boolq_res = run_standalone_likelihood_eval(model, tokenizer, "boolq", boolq_samples, device)
+        boolq_res = run_standalone_likelihood_eval(model, tokenizer, "boolq", boolq_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["boolq"] = boolq_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed BoolQ eval: {e}")
         condition_results["scores"]["boolq"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # 4. ARC-Easy
     try:
@@ -402,12 +419,15 @@ def evaluate_checkpoint_condition(
                 "choices": x["choices"]["text"],
                 "gold_index": label_map.get(x["answerKey"], 0),
             })
-        arc_res = run_standalone_likelihood_eval(model, tokenizer, "arc_easy", arc_samples, device)
+        arc_res = run_standalone_likelihood_eval(model, tokenizer, "arc_easy", arc_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["arc_easy"] = arc_res["acc_norm"]
         condition_results["scores"]["arc_easy_raw"] = arc_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed ARC-Easy eval: {e}")
         condition_results["scores"]["arc_easy"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     res_path = os.path.join(output_dir, f"eval_summary_{condition_name}.json")
     with open(res_path, "w", encoding="utf-8") as f:

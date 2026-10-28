@@ -149,15 +149,17 @@ def generate_qualitative_suite(
     max_new_tokens: int = 512,
     output_json_path: str = "results/task1/qualitative_responses.json",
     annotation_md_path: str = "results/task1/qualitative_annotations.md",
+    device: Optional[torch.device] = None,
 ) -> Dict[str, Any]:
     """
     Run the qualitative generation across all 7 conditions and save both
     the complete 168-response JSON catalog and the 42-response Markdown audit.
+    Iterates condition-by-condition, staging models on GPU one at a time
+    to keep VRAM consumption minimal (<2 GB) on 16GB GPUs like Tesla T4.
     """
     questions = load_qualitative_prompts(prompts_path)
     all_responses: Dict[str, Any] = {}
 
-    print(f"[Qualitative] Generating responses for {len(questions)} questions across {len(models_dict)} conditions...")
     for q in questions:
         q_id = str(q["id"])
         topic = q["topic"]
@@ -165,20 +167,34 @@ def generate_qualitative_suite(
             "topic": topic,
             "formats": {},
         }
-
         for fmt in ["plain", "json", "template"]:
-            prompt_text = q["formats"][fmt]
             all_responses[q_id]["formats"][fmt] = {
-                "prompt": prompt_text,
+                "prompt": q["formats"][fmt],
                 "conditions": {},
             }
 
-            for cond_name, (model, tokenizer) in models_dict.items():
+    print(f"[Qualitative] Generating responses for {len(questions)} questions across {len(models_dict)} conditions...")
+    target_device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    for cond_name, (model, tokenizer) in models_dict.items():
+        print(f"[Qualitative] Processing condition: {cond_name}...")
+        orig_device = next(model.parameters()).device
+        moved_to_gpu = False
+
+        if target_device.type == "cuda" and orig_device.type != "cuda":
+            model.to(target_device)
+            moved_to_gpu = True
+
+        for q in questions:
+            q_id = str(q["id"])
+            for fmt in ["plain", "json", "template"]:
+                prompt_text = q["formats"][fmt]
                 res = generate_response(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=prompt_text,
                     max_new_tokens=max_new_tokens,
+                    device=target_device if moved_to_gpu else None,
                 )
                 fmt_valid, fmt_msg = check_format_compliance(res["response"], fmt)
                 has_math, math_tokens = check_unnecessary_math_framing(res["response"])
@@ -192,6 +208,11 @@ def generate_qualitative_suite(
                     "unnecessary_math_framing": has_math,
                     "math_triggers": math_tokens,
                 }
+
+        if moved_to_gpu:
+            model.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     os.makedirs(os.path.dirname(output_json_path), exist_ok=True)
     with open(output_json_path, "w", encoding="utf-8") as f:
