@@ -243,6 +243,13 @@ def main():
     parser.add_argument("--skip-eval", action="store_true", help="Skip benchmark evaluation (for debugging)")
     args = parser.parse_args()
 
+    # Normalize args.stages to cleanly handle multi-stage strings or comma-separated lists
+    expanded_stages = []
+    for s in args.stages:
+        for piece in s.replace(",", " ").split():
+            expanded_stages.append(piece.strip())
+    args.stages = expanded_stages if expanded_stages else ["all"]
+
     config = Task1Config.from_yaml(args.config)
     set_seed(config.model.seed)
 

@@ -117,6 +117,7 @@ def _execute_pipeline_in_container(
     os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task1", exist_ok=True)
     volume.commit()
 
+    stage_tokens = stage.replace(",", " ").split() if isinstance(stage, str) else list(stage)
     cmd = [
         sys.executable,
         "-u",
@@ -125,7 +126,7 @@ def _execute_pipeline_in_container(
         "--config",
         config_path,
         "--stages",
-        stage,
+        *stage_tokens,
         "--single-gpu",
     ]
     if skip_eval:
