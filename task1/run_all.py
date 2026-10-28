@@ -20,10 +20,36 @@ import copy
 import json
 import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
 import subprocess
 import sys
 import time
 from typing import Dict, List, Optional, Tuple, Any
+
+def get_modal_checkpoint_callback():
+    if "MODAL_VOLUME_COMMIT" in os.environ:
+        def _cb(update: int, ckpt_file: str):
+            try:
+                import modal
+                vol_name = os.environ.get("MODAL_VOLUME_NAME", "pa3-volume")
+                vol = modal.Volume.from_name(vol_name)
+                vol.commit()
+                print(f"[Modal Volume] Committed checkpoint {update} to volume '{vol_name}'", flush=True)
+            except Exception as e:
+                print(f"[Modal Volume] Warning: commit error: {e}", flush=True)
+        return _cb
+    return None
+
+def trigger_modal_stage_commit(stage_name: str):
+    if "MODAL_VOLUME_COMMIT" in os.environ:
+        try:
+            import modal
+            vol_name = os.environ.get("MODAL_VOLUME_NAME", "pa3-volume")
+            vol = modal.Volume.from_name(vol_name)
+            vol.commit()
+            print(f"[Modal Volume] Committed stage '{stage_name}' to volume '{vol_name}'", flush=True)
+        except Exception as e:
+            print(f"[Modal Volume] Warning: stage commit error: {e}", flush=True)
 
 import pandas as pd
 import torch
@@ -325,6 +351,7 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         models_for_qualitative["baseline"] = (base_model, tokenizer)
+        trigger_modal_stage_commit("baseline")
 
     can_parallelize_training = (
         torch.cuda.device_count() >= 2
@@ -376,7 +403,8 @@ def main():
             print("STEP 3: FULL FINE-TUNING (FULL FT)")
             print("="*80)
             model, tokenizer = load_fresh_qwen_model(config, device)
-            logs = train_variant("full_ft", model, dataset, config, device, config.paths.checkpoint_dir)
+            ckpt_cb = get_modal_checkpoint_callback()
+            logs = train_variant("full_ft", model, dataset, config, device, config.paths.checkpoint_dir, checkpoint_callback=ckpt_cb)
             training_histories["full_ft"] = logs["history"]
             resource_stats["full_ft"] = {
                 "trainable_params": logs["trainable_params"],
@@ -406,6 +434,7 @@ def main():
             models_for_qualitative["full_ft_final"] = (model, tokenizer)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            trigger_modal_stage_commit("full_ft")
 
         # 4. Stage: Full FT + L2-SP
         if run_all or "train_l2sp" in args.stages:
@@ -413,7 +442,8 @@ def main():
             print("STEP 4: FULL FT WITH L2-SP REGULARIZATION")
             print("="*80)
             model, tokenizer = load_fresh_qwen_model(config, device)
-            logs = train_variant("full_ft_l2sp", model, dataset, config, device, config.paths.checkpoint_dir)
+            ckpt_cb = get_modal_checkpoint_callback()
+            logs = train_variant("full_ft_l2sp", model, dataset, config, device, config.paths.checkpoint_dir, checkpoint_callback=ckpt_cb)
             training_histories["full_ft_l2sp"] = logs["history"]
             resource_stats["full_ft_l2sp"] = {
                 "trainable_params": logs["trainable_params"],
@@ -431,6 +461,7 @@ def main():
             models_for_qualitative["full_ft_l2sp_final"] = (model, tokenizer)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            trigger_modal_stage_commit("full_ft_l2sp")
 
         # 5. Stage: LoRA-4
         if run_all or "train_lora4" in args.stages:
@@ -446,7 +477,8 @@ def main():
                 dropout=lora_cfg.get("dropout", 0.05),
                 target_modules=lora_cfg.get("target_modules", None),
             )
-            logs = train_variant("lora_4", model, dataset, config, device, config.paths.checkpoint_dir)
+            ckpt_cb = get_modal_checkpoint_callback()
+            logs = train_variant("lora_4", model, dataset, config, device, config.paths.checkpoint_dir, checkpoint_callback=ckpt_cb)
             training_histories["lora_4"] = logs["history"]
             resource_stats["lora_4"] = {
                 "trainable_params": logs["trainable_params"],
@@ -466,6 +498,7 @@ def main():
             models_for_qualitative["lora_4_final"] = (merged_model, tokenizer)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            trigger_modal_stage_commit("lora_4")
 
         # 6. Stage: LoRA-16
         if run_all or "train_lora16" in args.stages:
@@ -481,7 +514,8 @@ def main():
                 dropout=lora_cfg.get("dropout", 0.05),
                 target_modules=lora_cfg.get("target_modules", None),
             )
-            logs = train_variant("lora_16", model, dataset, config, device, config.paths.checkpoint_dir)
+            ckpt_cb = get_modal_checkpoint_callback()
+            logs = train_variant("lora_16", model, dataset, config, device, config.paths.checkpoint_dir, checkpoint_callback=ckpt_cb)
             training_histories["lora_16"] = logs["history"]
             resource_stats["lora_16"] = {
                 "trainable_params": logs["trainable_params"],
@@ -501,6 +535,7 @@ def main():
             models_for_qualitative["lora_16_final"] = (merged_model, tokenizer)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            trigger_modal_stage_commit("lora_16")
 
         # 7. Stage: OPLoRA-16
         if run_all or "train_oplora" in args.stages:
@@ -518,7 +553,8 @@ def main():
                 target_modules=oplora_cfg.get("target_modules", None),
                 device=device,
             )
-            logs = train_variant("oplora_16", model, dataset, config, device, config.paths.checkpoint_dir)
+            ckpt_cb = get_modal_checkpoint_callback()
+            logs = train_variant("oplora_16", model, dataset, config, device, config.paths.checkpoint_dir, checkpoint_callback=ckpt_cb)
             training_histories["oplora_16"] = logs["history"]
             resource_stats["oplora_16"] = {
                 "trainable_params": logs["trainable_params"],
@@ -540,6 +576,7 @@ def main():
             models_for_qualitative["oplora_16_final"] = (merged_model, tokenizer)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            trigger_modal_stage_commit("oplora_16")
 
     # 8. Stage: Diagnostics (Weight-space & Activation)
     if run_all or "diagnostics" in args.stages:
@@ -596,6 +633,7 @@ def main():
             json.dump(diag_data, f, indent=2)
         print(f"[Diagnostics] Saved diagnostic metrics to {diag_path}")
         diagnostic_results = diag_data
+        trigger_modal_stage_commit("diagnostics")
 
     # 9. Stage: Qualitative Suite & 42-Response Annotation
     if run_all or "qualitative" in args.stages:
@@ -619,6 +657,7 @@ def main():
             annotation_md_path=os.path.join(config.paths.output_dir, "qualitative_annotations.md"),
             device=device,
         )
+        trigger_modal_stage_commit("qualitative")
 
     # 10. Stage: Synthesis & Consolidated Reporting
     if run_all or "synthesize" in args.stages:
@@ -702,6 +741,8 @@ def main():
             curves_path = os.path.join(config.paths.output_dir, "learning_curves.csv")
             curves_df.to_csv(curves_path, index=False)
             print(f"[Synthesis] Saved training learning curves to {curves_path}")
+
+        trigger_modal_stage_commit("synthesize")
 
         print("\n" + "="*80)
         print("ALL TASK 1 EXPERIMENTS COMPLETED SUCCESSFULLY!")

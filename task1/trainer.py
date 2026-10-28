@@ -111,6 +111,7 @@ def train_variant(
     device: torch.device,
     output_checkpoint_dir: str = "checkpoints/task1",
     resume_from_checkpoint: Optional[str] = None,
+    checkpoint_callback: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     Execute full training for one of the five variants.
@@ -238,6 +239,13 @@ def train_variant(
     ckpt_save_dir = os.path.join(output_checkpoint_dir, variant_name)
     os.makedirs(ckpt_save_dir, exist_ok=True)
 
+    # Redundant logging: streaming JSONL and CSV files flushed on every single step
+    live_jsonl_path = os.path.join(ckpt_save_dir, "training_steps.jsonl")
+    live_csv_path = os.path.join(ckpt_save_dir, "training_progress.csv")
+    if not os.path.exists(live_csv_path):
+        with open(live_csv_path, "w", encoding="utf-8") as f_csv_init:
+            f_csv_init.write("update,sft_loss,total_loss,omega,lambda_omega,lr,grad_norm,valid_tokens,sec_per_step\n")
+
     microbatch_buffer = []
     last_print_time = time.time()
     last_print_update = current_update
@@ -323,20 +331,41 @@ def train_variant(
                     "grad_norm": float(grad_norm.item()) if hasattr(grad_norm, "item") else float(grad_norm),
                     "valid_tokens": accum_tokens,
                 }
+                now = time.time()
+                dt = now - last_print_time
+                d_steps = max(1, current_update - last_print_update)
+                sec_per_step = dt / d_steps if (last_print_update > 0 or current_update > 1) else dt
+                last_print_time = now
+                last_print_update = current_update
+
+                step_log["sec_per_step"] = float(sec_per_step)
                 logs["history"].append(step_log)
 
-                if current_update == 1 or current_update % 25 == 0 or current_update in config.training.checkpoint_updates:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    now = time.time()
-                    dt = now - last_print_time
-                    d_steps = max(1, current_update - last_print_update)
-                    sec_per_step = dt / d_steps if last_print_update > 0 or current_update > 1 else dt
-                    last_print_time = now
-                    last_print_update = current_update
-                    print(f"[{variant_name}] Update {current_update:4d}/{target_updates} | "
-                          f"SFT Loss: {total_sft_loss_val:.4f} | LR: {current_lr:.2e} | "
-                          f"Grad Norm: {step_log['grad_norm']:.2f} | Speed: {sec_per_step:.2f}s/step")
+                # Output EVERY single step per PA requirements (flushed immediately)
+                print(
+                    f"[{variant_name}] Update {current_update:4d}/{target_updates} | "
+                    f"SFT Loss: {total_sft_loss_val:.4f} | Total Loss: {total_loss_val:.4f} | "
+                    f"LR: {current_lr:.2e} | Grad Norm: {step_log['grad_norm']:.2f} | "
+                    f"Tokens: {accum_tokens:4d} | Speed: {sec_per_step:.2f}s/step",
+                    flush=True,
+                )
+
+                # Redundant streaming persistence on every single update
+                try:
+                    with open(live_jsonl_path, "a", encoding="utf-8") as f_j:
+                        f_j.write(json.dumps(step_log) + "\n")
+                        f_j.flush()
+                        os.fsync(f_j.fileno())
+                    with open(live_csv_path, "a", encoding="utf-8") as f_c:
+                        f_c.write(
+                            f"{current_update},{total_sft_loss_val:.6f},{total_loss_val:.6f},"
+                            f"{omega_val:.6f},{lambda_omega_val:.6f},{current_lr:.6e},"
+                            f"{step_log['grad_norm']:.6f},{accum_tokens},{sec_per_step:.4f}\n"
+                        )
+                        f_c.flush()
+                        os.fsync(f_c.fileno())
+                except Exception as log_err:
+                    print(f"[{variant_name}] Warning: Failed to append to live log files: {log_err}", flush=True)
 
                 # Checkpoint saving schedule: 312, 625, 937, 1250
                 if current_update in config.training.checkpoint_updates:
@@ -358,7 +387,7 @@ def train_variant(
                         "path": ckpt_file,
                         "size_mb": ckpt_size,
                     }
-                    print(f"[{variant_name}] Saved recovery checkpoint at update {current_update} ({ckpt_size:.2f} MB)")
+                    print(f"[{variant_name}] Saved recovery checkpoint at update {current_update} ({ckpt_size:.2f} MB)", flush=True)
 
                     # Full-model displacement recording
                     if variant_name in ["full_ft", "full_ft_l2sp"] and theta_0 is not None:
@@ -366,7 +395,34 @@ def train_variant(
                            (variant_name == "full_ft_l2sp" and current_update == 1250):
                             disp = compute_parameter_displacement(model, theta_0)
                             logs["displacements"][str(current_update)] = disp
-                            print(f"[{variant_name}] ||theta - theta_0||_2 at update {current_update}: {disp:.6f}")
+                            print(f"[{variant_name}] ||theta - theta_0||_2 at update {current_update}: {disp:.6f}", flush=True)
+
+                    # Periodically save training summary so checkpoint state is never lost
+                    partial_summary_file = os.path.join(ckpt_save_dir, "training_summary.json")
+                    try:
+                        with open(partial_summary_file, "w", encoding="utf-8") as f_sum:
+                            json.dump({
+                                "variant": variant_name,
+                                "trainable_params": logs["trainable_params"],
+                                "total_params": logs["total_params"],
+                                "total_train_time_sec": training_timer.elapsed,
+                                "peak_vram_mb": get_peak_vram_mb(),
+                                "checkpoints": logs["checkpoints"],
+                                "displacements": logs["displacements"],
+                                "skipped_updates": logs.get("skipped_updates", 0),
+                                "history": logs["history"],
+                            }, f_sum, indent=2)
+                            f_sum.flush()
+                            os.fsync(f_sum.fileno())
+                    except Exception:
+                        pass
+
+                    # Trigger external callback if registered (e.g. Modal Volume commit)
+                    if checkpoint_callback is not None and callable(checkpoint_callback):
+                        try:
+                            checkpoint_callback(current_update, ckpt_file)
+                        except Exception as cb_err:
+                            print(f"[{variant_name}] Warning: checkpoint callback error: {cb_err}", flush=True)
 
     logs["total_train_time_sec"] = training_timer.elapsed
     logs["peak_vram_mb"] = get_peak_vram_mb()

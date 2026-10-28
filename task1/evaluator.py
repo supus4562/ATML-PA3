@@ -157,8 +157,8 @@ def _single_device_gsm8k_eval(
                     "tokens_generated": gen_len,
                 })
 
-            if (i + actual_batch_size) % 200 == 0 or (i + actual_batch_size) >= total_count:
-                print(f"  {prefix}Processed {min(i + actual_batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + actual_batch_size, total_count)} ({correct_count/min(i + actual_batch_size, total_count)*100:.2f}%)")
+                processed_so_far = min(i + actual_batch_size, total_count)
+                print(f"  {prefix}Batch {i // actual_batch_size + 1} | Processed {processed_so_far}/{total_count} | Exact Match: {correct_count}/{processed_so_far} ({correct_count/processed_so_far*100:.2f}%)", flush=True)
     finally:
         tokenizer.padding_side = orig_padding_side
         tokenizer.pad_token_id = orig_pad_token_id
@@ -446,23 +446,111 @@ def evaluate_checkpoint_condition(
         pass
 
     if has_lmeval:
-        print("[Evaluator] lm-evaluation-harness detected. Attempting native harness tasks...")
+        print("[Evaluator] Native lm-evaluation-harness detected. Initializing HFLM harness...", flush=True)
         try:
             from lm_eval.models.huggingface import HFLM
             eval_batch_size = getattr(config.evaluation, "batch_size", 64)
-            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size)
-            eval_output = lm_eval.simple_evaluate(
+            hflm_device = str(device) if device.type == "cuda" else "cpu"
+            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size, device=hflm_device)
+
+            # 1. GSM8K via lm-eval: num_fewshot=0, chat template enabled, greedy, 1024 token cap
+            print(f"[Evaluator - lm-eval] Running GSM8K (gsm8k_cot) with chat_template=True, greedy decoding, 1024-token cap...", flush=True)
+            gsm_eval = lm_eval.simple_evaluate(
                 model=lm_obj,
-                tasks=["gsm8k_cot", "hellaswag", "boolq", "arc_easy"],
+                tasks=["gsm8k_cot"],
                 num_fewshot=0,
+                apply_chat_template=True,
+                gen_kwargs={"max_gen_toks": 1024, "do_sample": False, "temperature": 0.0},
+                log_samples=True,
                 batch_size=eval_batch_size,
             )
-            for task_name, task_metrics in eval_output.get("results", {}).items():
-                primary = task_metrics.get("acc_norm,none", task_metrics.get("acc,none", task_metrics.get("exact_match,none", 0.0)))
-                condition_results["scores"][task_name] = float(primary * 100.0)
+
+            gsm_res = gsm_eval.get("results", {}).get("gsm8k_cot", {})
+            gsm_score = (
+                gsm_res.get("exact_match,flexible-extract")
+                or gsm_res.get("exact_match,strict-match")
+                or gsm_res.get("exact_match,none")
+                or gsm_res.get("acc,none", 0.0)
+            )
+            condition_results["scores"]["gsm8k"] = float(gsm_score * 100.0)
+
+            # Extract per-example outputs, gold answers, and truncation flags
+            gsm_samples = gsm_eval.get("samples", {}).get("gsm8k_cot", [])
+            unextractable_count = 0
+            truncated_count = 0
+            processed_samples = []
+            for s in gsm_samples:
+                resps = s.get("resps", [[""]])
+                gen_text = resps[0][0] if (resps and resps[0]) else ""
+                pred = extract_gsm8k_answer(gen_text)
+                gold = extract_gsm8k_answer(s.get("target", ""))
+                is_trunc = len(tokenizer.encode(gen_text, add_special_tokens=False)) >= 1024
+                if is_trunc:
+                    truncated_count += 1
+                if pred is None:
+                    unextractable_count += 1
+                processed_samples.append({
+                    "doc_id": s.get("doc_id"),
+                    "question": s.get("arguments", {}).get("gen_args_0", {}).get("arg_0", "") if isinstance(s.get("arguments"), dict) else "",
+                    "target": s.get("target", ""),
+                    "gold_answer": gold,
+                    "generated_text": gen_text,
+                    "extracted_answer": pred,
+                    "is_correct": bool(pred is not None and gold is not None and pred == gold),
+                    "truncated": is_trunc,
+                })
+
+            condition_results["metadata"]["gsm8k"] = {
+                "unextractable": unextractable_count,
+                "truncated": truncated_count,
+            }
+            gsm_out_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.json")
+            with open(gsm_out_file, "w", encoding="utf-8") as f_gsm:
+                json.dump(processed_samples or gsm_samples, f_gsm, indent=2)
+            gsm_jsonl_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.jsonl")
+            with open(gsm_jsonl_file, "w", encoding="utf-8") as f_jl:
+                for ps in (processed_samples or gsm_samples):
+                    f_jl.write(json.dumps(ps) + "\n")
+            print(f"[Evaluator - lm-eval] GSM8K completed: Exact Match = {condition_results['scores']['gsm8k']:.2f}% | Unextractable: {unextractable_count} | Truncated: {truncated_count}", flush=True)
+
+            # 2. Completion benchmarks via lm-eval: stock completion prompts WITHOUT chat template
+            print(f"[Evaluator - lm-eval] Running completion benchmarks (hellaswag, boolq, arc_easy) without chat template...", flush=True)
+            comp_eval = lm_eval.simple_evaluate(
+                model=lm_obj,
+                tasks=["hellaswag", "boolq", "arc_easy"],
+                num_fewshot=0,
+                apply_chat_template=False,
+                log_samples=True,
+                batch_size=eval_batch_size,
+            )
+
+            c_results = comp_eval.get("results", {})
+            # HellaSwag: acc_norm primary, acc raw
+            hs_res = c_results.get("hellaswag", {})
+            condition_results["scores"]["hellaswag"] = float(hs_res.get("acc_norm,none", hs_res.get("acc,none", 0.0)) * 100.0)
+            condition_results["scores"]["hellaswag_raw"] = float(hs_res.get("acc,none", 0.0) * 100.0)
+
+            # BoolQ: acc
+            bq_res = c_results.get("boolq", {})
+            condition_results["scores"]["boolq"] = float(bq_res.get("acc,none", 0.0) * 100.0)
+
+            # ARC-Easy: acc_norm primary, acc raw
+            arc_res = c_results.get("arc_easy", {})
+            condition_results["scores"]["arc_easy"] = float(arc_res.get("acc_norm,none", arc_res.get("acc,none", 0.0)) * 100.0)
+            condition_results["scores"]["arc_easy_raw"] = float(arc_res.get("acc,none", 0.0) * 100.0)
+
+            # Redundant storage: raw lm-eval dictionary
+            raw_lmeval_file = os.path.join(output_dir, f"lmeval_results_{condition_name}.json")
+            with open(raw_lmeval_file, "w", encoding="utf-8") as f_raw:
+                json.dump({"gsm8k": gsm_eval.get("results"), "completion": comp_eval.get("results")}, f_raw, indent=2)
+
+            res_path = os.path.join(output_dir, f"eval_summary_{condition_name}.json")
+            with open(res_path, "w", encoding="utf-8") as f:
+                json.dump(condition_results, f, indent=2)
+            print(f"[Evaluator - lm-eval] Benchmark evaluation successful for {condition_name}: {condition_results['scores']}", flush=True)
             return condition_results
         except Exception as e:
-            print(f"[Evaluator] lm_eval run error: {e}. Falling back to internal standalone runner.")
+            print(f"[Evaluator] Warning: Native lm_eval run encountered error: {e}. Falling back to internal standalone runner.", flush=True)
 
     print("[Evaluator] Running internal standalone evaluator...")
     from datasets import load_dataset
@@ -484,6 +572,10 @@ def evaluate_checkpoint_condition(
         gsm_out_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.json")
         with open(gsm_out_file, "w", encoding="utf-8") as f:
             json.dump(gsm8k_res["details"], f, indent=2)
+        gsm_out_jsonl = os.path.join(output_dir, f"gsm8k_details_{condition_name}.jsonl")
+        with open(gsm_out_jsonl, "w", encoding="utf-8") as f_jl:
+            for d in gsm8k_res["details"]:
+                f_jl.write(json.dumps(d) + "\n")
     except Exception as e:
         print(f"[Warning] Failed GSM8K eval: {e}")
         condition_results["scores"]["gsm8k"] = 0.0

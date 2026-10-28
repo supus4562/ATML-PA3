@@ -140,7 +140,42 @@ bash run_kaggle.sh
 
 ---
 
-## 6. Output Deliverables in `results/task1/`
+## 6. Execution Guide for Modal Cloud (modal.com)
+
+The `modal` branch adds serverless execution on **Modal (modal.com)** with persistent cloud volumes and real-time streaming:
+- **Persistent Cloud Storage (`pa3-volume`)**: Checkpoints, tokenized data cache, and results are stored in a durable cloud volume and committed automatically after each checkpoint and stage.
+- **Real-Time Step-by-Step Logging**: Every single optimizer update ($1, 2, \dots, 1250$) and evaluation batch is printed and flushed in real time, with redundant streaming into `.jsonl` and `.csv`.
+- **Native `lm-evaluation-harness`**: Executes GSM8K with non-thinking chat template ($1,024$-token cap, greedy decoding) and HellaSwag, BoolQ, ARC-Easy with completion prompts, saving per-example outputs and predictions.
+- **Cost-Efficient Acceleration**: Default runner uses **NVIDIA A10G** (~$\$1.10$/hr; entire Task 1 finishes in ~$\$1.65 - \$2.20$, well within the free $\$30$ credit). Also supports **NVIDIA A100** (`--gpu A100`) and **L4** (`--gpu L4`).
+
+### Quick Start on Modal:
+```bash
+# 1. Install modal locally
+pip install modal
+
+# 2. Authenticate with your Modal account (with your $30 compute credits)
+modal setup
+
+# 3. Dry-run verification (checks container, CUDA, volume, and packages in ~30s)
+modal run modal_run.py --dry-run
+
+# 4. Launch full Task 1 pipeline on NVIDIA A10G
+modal run modal_run.py
+
+# 5. (Alternative) Launch on NVIDIA A100
+modal run modal_run.py --gpu A100
+
+# 6. Run a specific stage
+modal run modal_run.py --stage train_full_ft
+
+# 7. Download all results from cloud volume directly to local repo
+modal run modal_run.py::download_results
+```
+
+
+---
+
+## 7. Output Deliverables in `results/task1/`
 
 Upon completion, all required evidence is automatically generated in `results/task1/`:
 - `metrics_summary.json`: Benchmark scores across all 7 evaluation conditions and primary score changes from baseline in percentage points.
