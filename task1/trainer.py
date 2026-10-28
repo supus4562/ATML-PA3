@@ -123,6 +123,7 @@ def train_variant(
     method_cfg = config.methods.get(variant_name, {})
     peak_lr = method_cfg.get("peak_lr", 2e-5)
     lambda_l2sp = method_cfg.get("lambda_l2sp", 0.0)
+    model.to(device)
 
     # 1. Parameter snapshot for L2-SP or displacement
     theta_0: Optional[Dict[str, torch.Tensor]] = None
@@ -354,15 +355,15 @@ def train_variant(
                 step_log["sec_per_step"] = float(sec_per_step)
                 logs["history"].append(step_log)
 
-                # Update tqdm progress bar on every single step
-                pbar.update(1)
+                # Update tqdm progress bar on every single step (single clean render)
                 pbar.set_postfix({
                     "sft_loss": f"{total_sft_loss_val:.4f}",
                     "lr": f"{current_lr:.2e}",
                     "grad": f"{step_log['grad_norm']:.2f}",
                     "toks": accum_tokens,
                     "s/it": f"{sec_per_step:.2f}",
-                })
+                }, refresh=False)
+                pbar.update(1)
                 sys.stdout.flush()
 
                 # Redundant streaming persistence on every single update

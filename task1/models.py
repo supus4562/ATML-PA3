@@ -42,9 +42,10 @@ class LoRALinear(nn.Module):
         else:
             self.bias = None
 
-        # Trainable adapter matrices
-        self.lora_A = nn.Parameter(torch.empty(rank, self.in_features, dtype=torch.float32))
-        self.lora_B = nn.Parameter(torch.zeros(self.out_features, rank, dtype=torch.float32))
+        # Trainable adapter matrices on same device as base layer
+        layer_device = base_layer.weight.device
+        self.lora_A = nn.Parameter(torch.empty(rank, self.in_features, dtype=torch.float32, device=layer_device))
+        self.lora_B = nn.Parameter(torch.zeros(self.out_features, rank, dtype=torch.float32, device=layer_device))
 
         # Reset parameters: A random gaussian, B zeros
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -104,9 +105,10 @@ class OPLoRALinear(nn.Module):
         else:
             self.bias = None
 
-        # Trainable adapter matrices
-        self.lora_A = nn.Parameter(torch.empty(rank, self.in_features, dtype=torch.float32))
-        self.lora_B = nn.Parameter(torch.zeros(self.out_features, rank, dtype=torch.float32))
+        # Trainable adapter matrices on same device as base layer
+        layer_device = base_layer.weight.device
+        self.lora_A = nn.Parameter(torch.empty(rank, self.in_features, dtype=torch.float32, device=layer_device))
+        self.lora_B = nn.Parameter(torch.zeros(self.out_features, rank, dtype=torch.float32, device=layer_device))
 
         # Reset parameters: A random gaussian, B zeros
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -116,11 +118,11 @@ class OPLoRALinear(nn.Module):
 
         # Frozen singular bases U_k [out_features, k] and V_k [in_features, k]
         if U_k is not None and V_k is not None:
-            self.register_buffer("U_k", U_k.float(), persistent=False)
-            self.register_buffer("V_k", V_k.float(), persistent=False)
+            self.register_buffer("U_k", U_k.float().to(layer_device), persistent=False)
+            self.register_buffer("V_k", V_k.float().to(layer_device), persistent=False)
         else:
-            self.register_buffer("U_k", torch.empty(self.out_features, self.protection_rank_k), persistent=False)
-            self.register_buffer("V_k", torch.empty(self.in_features, self.protection_rank_k), persistent=False)
+            self.register_buffer("U_k", torch.empty(self.out_features, self.protection_rank_k, device=layer_device), persistent=False)
+            self.register_buffer("V_k", torch.empty(self.in_features, self.protection_rank_k, device=layer_device), persistent=False)
 
     def set_singular_bases(self, U_k: torch.Tensor, V_k: torch.Tensor) -> None:
         """Register pre-computed singular bases."""
@@ -229,6 +231,11 @@ def apply_lora_to_model(
                 )
                 setattr(parent, child_name, lora_layer)
 
+    try:
+        model_device = next(model.parameters()).device
+        model.to(model_device)
+    except StopIteration:
+        pass
     return model
 
 
@@ -280,6 +287,11 @@ def apply_oplora_to_model(
     print(f"[OPLoRA] SVD Preprocessing: {overhead_stats['num_matrices_svd']} matrices in "
           f"{overhead_stats['preprocessing_time_sec']:.2f}s | Basis storage: {overhead_stats['basis_storage_mb']:.2f} MB")
 
+    try:
+        target_dev = device if device is not None else next(model.parameters()).device
+        model.to(target_dev)
+    except StopIteration:
+        pass
     return model, overhead_stats
 
 
