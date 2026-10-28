@@ -215,6 +215,10 @@ def apply_lora_to_model(
     target_modules: Optional[List[str]] = None,
 ) -> nn.Module:
     """Wrap target linear layers in the transformer with LoRALinear."""
+    # 1. Freeze all base model parameters (PA invariant: frozen FP16 backbone)
+    for param in model.parameters():
+        param.requires_grad = False
+
     if target_modules is None:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -230,6 +234,13 @@ def apply_lora_to_model(
                     dropout=dropout,
                 )
                 setattr(parent, child_name, lora_layer)
+
+    # 2. Ensure strictly adapter parameters (lora_A, lora_B) are trainable in FP32
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
     try:
         model_device = next(model.parameters()).device
@@ -249,6 +260,10 @@ def apply_oplora_to_model(
     device: Optional[torch.device] = None,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Wrap target linear layers with OPLoRALinear and pre-compute SVD bases."""
+    # 1. Freeze all base model parameters (PA invariant: frozen FP16 backbone)
+    for param in model.parameters():
+        param.requires_grad = False
+
     if target_modules is None:
         target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 
@@ -286,6 +301,13 @@ def apply_oplora_to_model(
     overhead_stats["basis_storage_mb"] = (total_basis_elements * 4.0) / (1024.0 * 1024.0)
     print(f"[OPLoRA] SVD Preprocessing: {overhead_stats['num_matrices_svd']} matrices in "
           f"{overhead_stats['preprocessing_time_sec']:.2f}s | Basis storage: {overhead_stats['basis_storage_mb']:.2f} MB")
+
+    # 2. Ensure strictly adapter parameters (lora_A, lora_B) are trainable in FP32
+    for name, param in model.named_parameters():
+        if "lora_" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
     try:
         target_dev = device if device is not None else next(model.parameters()).device

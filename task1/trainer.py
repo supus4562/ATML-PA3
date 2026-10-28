@@ -136,6 +136,11 @@ def train_variant(
         print(f"[{variant_name}] Reference theta_0 saved to CPU: {ref_storage_mb:.2f} MB in {ref_transfer_sec:.2f}s")
 
     # 2. Parameter counts
+    # Ensure all trainable parameters are FP32 per PA invariant (FP32 master parameters / adapter weights)
+    for p in model.parameters():
+        if p.requires_grad and p.dtype != torch.float32:
+            p.data = p.data.float()
+
     total_params, trainable_params = count_parameters(model)
     print(f"[{variant_name}] Parameters: Total = {total_params:,} | Trainable = {trainable_params:,}")
 
