@@ -310,6 +310,10 @@ def evaluate_checkpoint_condition(
 
     # PDF invariant: Evaluate all models in FP16 with dropout disabled
     model.eval()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    if hasattr(model, "config"):
+        model.config.use_cache = True
     if device.type == "cuda":
         model = model.half()
     for m in model.modules():
@@ -371,7 +375,10 @@ def evaluate_checkpoint_condition(
 
     # 2. HellaSwag
     try:
-        hs_data = load_dataset("hellaswag", split="validation")
+        try:
+            hs_data = load_dataset("hellaswag", split="validation")
+        except Exception:
+            hs_data = load_dataset("Rowan/hellaswag", split="validation")
         hs_samples = []
         for x in hs_data:
             hs_samples.append({

@@ -31,7 +31,7 @@ training:
     weight_decay: 0.01
     fused: false                   # Robust across all Kaggle CUDA/PyTorch driver builds
   gradient_clipping: 1.0
-  gradient_checkpointing: false
+  gradient_checkpointing: true
   use_cache: true
   fp16: true
   checkpoint_updates: [312, 625, 937, 1250]

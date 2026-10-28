@@ -90,7 +90,10 @@ def sample_activation_probe_set(
             })
 
         # 2. HellaSwag val
-        hellaswag = load_dataset("hellaswag", split="validation")
+        try:
+            hellaswag = load_dataset("hellaswag", split="validation")
+        except Exception:
+            hellaswag = load_dataset("Rowan/hellaswag", split="validation")
         hs_indices = list(range(len(hellaswag)))
         rng.shuffle(hs_indices)
         selected_hs = hs_indices[:num_hellaswag]

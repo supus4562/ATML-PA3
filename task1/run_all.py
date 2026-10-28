@@ -19,6 +19,7 @@ import argparse
 import copy
 import json
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import sys
 import time
 from typing import Dict, List, Optional, Tuple, Any
