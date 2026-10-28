@@ -169,7 +169,8 @@ modal run modal_run.py --gpu A100
 modal run modal_run.py --stage train_full_ft
 
 # 7. Download all results from cloud volume directly to local repo
-modal run modal_run.py::download_results
+modal run modal_run.py --download
+# (Or alternatively: modal volume get pa3-volume results/ ./results/)
 ```
 
 
