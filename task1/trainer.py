@@ -165,10 +165,10 @@ def train_variant(
     else:
         scaler = torch.cuda.amp.GradScaler(enabled=(config.training.fp16 and device.type == "cuda"))
 
-    # 5. DataLoader with dynamic collator (high-throughput multi-worker prefetching)
+    # 5. DataLoader with dynamic collator (high-throughput multi-worker prefetching for RTX 6000 Pro)
     collator = DynamicPaddingCollator(pad_token_id=0, ignore_index=-100)
     num_cpus = os.cpu_count() or 1
-    num_workers = min(4, max(1, num_cpus - 1)) if device.type == "cuda" else 0
+    num_workers = min(6, max(1, num_cpus - 1)) if device.type == "cuda" else 0
     data_loader = DataLoader(
         dataset,
         batch_size=config.training.micro_batch_size,

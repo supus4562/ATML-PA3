@@ -119,11 +119,15 @@ def main():
     if device.type == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - Ampere/Hopper/Blackwell Tensor Cores active.")
-        # Ampere/Hopper/Blackwell high-throughput performance optimizations
+        print(f"[Hardware] GPU: {gpu_name} ({vram_gb:.1f} GB VRAM) - RTX 6000 Pro (Ada/Blackwell) Tensor Cores active.")
+        # RTX 6000 Pro (Ada Lovelace & Blackwell) high-throughput performance optimizations
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
+        if hasattr(torch.backends.cuda.matmul, "allow_fp16_reduced_precision_reduction"):
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
 
     os.makedirs(config.paths.output_dir, exist_ok=True)
     os.makedirs(config.paths.checkpoint_dir, exist_ok=True)

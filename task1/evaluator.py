@@ -85,8 +85,8 @@ def run_standalone_gsm8k_eval(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Optimized generation batch size
-    actual_batch_size = min(batch_size, 32) if device.type == "cuda" else batch_size
+    # Optimized generation batch size for RTX 6000 Pro (48GB VRAM)
+    actual_batch_size = min(batch_size, 64) if device.type == "cuda" else batch_size
     print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded)...")
 
     try:
