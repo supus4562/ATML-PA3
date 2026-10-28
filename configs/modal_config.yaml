@@ -31,7 +31,7 @@ training:
     weight_decay: 0.01
     fused: true                    # Fully supported on Modal CUDA environment
   gradient_clipping: 1.0
-  gradient_checkpointing: false    # Ample VRAM on 24GB A10G / 40GB A100: disabling enables 2x faster throughput
+  gradient_checkpointing: true     # STRICT INVARIANT: Enabled per PA3 PDF Table
   use_cache: true
   fp16: true
   checkpoint_updates: [312, 625, 937, 1250]
