@@ -44,7 +44,8 @@ class TrainingConfig:
     learning_rate_schedule: str = "cosine"
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     gradient_clipping: float = 1.0
-    gradient_checkpointing: bool = True
+    gradient_checkpointing: bool = False
+    use_cache: bool = True
     fp16: bool = True
     checkpoint_updates: List[int] = field(default_factory=lambda: [312, 625, 937, 1250])
     evaluation_updates: Dict[str, List[int]] = field(

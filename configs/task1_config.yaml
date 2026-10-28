@@ -29,7 +29,8 @@ training:
     weight_decay: 0.01
     fused: true
   gradient_clipping: 1.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
+  use_cache: true
   fp16: true
   checkpoint_updates: [312, 625, 937, 1250]
   evaluation_updates:

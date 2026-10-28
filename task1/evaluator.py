@@ -73,6 +73,9 @@ def run_standalone_gsm8k_eval(
     Uses left-padding for causal decoder-only batched generation.
     """
     model.eval()
+    if hasattr(model, "config"):
+        model.config.use_cache = True
+
     results = []
     correct_count = 0
     total_count = len(test_examples)
@@ -87,7 +90,7 @@ def run_standalone_gsm8k_eval(
 
     # Optimized generation batch size for RTX 6000 Pro (48GB VRAM)
     actual_batch_size = min(batch_size, 64) if device.type == "cuda" else batch_size
-    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded)...")
+    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded, KV-cached)...")
 
     try:
         for i in range(0, total_count, actual_batch_size):
@@ -121,6 +124,7 @@ def run_standalone_gsm8k_eval(
                     **inputs,
                     max_new_tokens=max_new_tokens,
                     do_sample=False,
+                    use_cache=True,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                 )

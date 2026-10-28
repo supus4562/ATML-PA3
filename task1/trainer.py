@@ -217,6 +217,11 @@ def train_variant(
         model.gradient_checkpointing_enable()
         if hasattr(model, "config"):
             model.config.use_cache = False
+    else:
+        if hasattr(model, "gradient_checkpointing_disable"):
+            model.gradient_checkpointing_disable()
+        if hasattr(model, "config"):
+            model.config.use_cache = False
 
     grad_accum_steps = config.training.gradient_accumulation_steps
     target_updates = config.training.total_updates
