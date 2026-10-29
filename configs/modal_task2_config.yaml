@@ -1,0 +1,111 @@
+# ATML PA3 - Task 2 Configuration for Modal Cloud GPU (NVIDIA A100 / RTX 6000)
+# Persistent volume caching, FP16 feature caching, and 4,500 curriculum updates.
+
+vision:
+  model_name_or_path: google/siglip-base-patch16-224
+  image_size: 224
+  num_patches: 196
+  hidden_dim: 768
+  apply_final_norm: true
+  compressed_patches: 49
+connector:
+  in_features: 768
+  hidden_features: 1024
+  out_features: 1024
+  activation: gelu
+  init_scale: 1.0
+language_model:
+  model_name_or_path: Qwen/Qwen3-0.6B
+  enable_thinking: false
+  attn_implementation: sdpa
+  seed: 6304
+data:
+  coco_captions_train_count: 18000
+  coco_captions_dev_count: 96
+  grounding_dev_pairs: 24
+  grounding_test_pairs: 64
+  natural_vqa_train_pairs: 1536
+  natural_vqa_dev_pairs: 32
+  natural_vqa_test_pairs: 96
+  cache_dir: /root/volume/data_cache/task2
+  feature_cache_dir: /root/volume/data_cache/task2/siglip_features
+  seed: 6304
+training:
+  seed: 6304
+  num_epochs: 1
+  micro_batch_size: 8
+  gradient_accumulation_steps: 2
+  total_updates: 4500
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.1
+  gradient_clipping: 1.0
+  fp16: true
+  gradient_checkpointing: false
+  question_token_cap: 80
+  caption_target_cap: 64
+  short_answer_target_cap: 16
+  checkpoint_frequency: 250
+  endpoint_updates:
+  - 2250
+  - 3750
+  - 4500
+  dev_eval_frequency: 500
+  optimizer:
+    name: AdamW
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    weight_decay: 0.01
+    fused: true
+  stage1:
+    updates: 2250
+    connector_peak_lr: 0.001
+    lora_enabled: false
+  stage2:
+    updates: 1500
+    connector_peak_lr: 0.0001
+    lora_peak_lr: 2.0e-05
+    lora_rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    sampling_probs:
+      presence: 0.5
+      counting: 0.25
+      caption_replay: 0.25
+  stage3:
+    updates: 750
+    connector_peak_lr: 5.0e-05
+    lora_peak_lr: 1.0e-05
+    lora_rank: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    sampling_probs:
+      natural_vqa: 0.7
+      presence_replay: 0.1
+      counting_replay: 0.1
+      caption_replay: 0.1
+evaluation:
+  batch_size: 8
+  max_new_tokens: 16
+  temperature: 0.0
+  bootstrap_resamples: 4000
+  confidence_level: 0.95
+  conditions:
+  - correct
+  - complementary_swap
+  - mismatched
+  - no_image
+paths:
+  output_dir: /root/volume/results/task2
+  checkpoint_dir: /root/volume/checkpoints/task2
