@@ -1,0 +1,49 @@
+# ATML PA3 - Task 3 Local Workstation / Server Configuration
+# Test-Time Compute: Sampling, Selection, and Adaptive Inference
+
+seed: 6304
+
+paths:
+  data_dir: "data/ATML-PA3-Data"
+  output_dir: "results/task3"
+  checkpoint_dir: "checkpoints/task3"
+
+models:
+  math_llm:
+    name: "Qwen/Qwen2.5-3B-Instruct"
+    dataset: "MATH"
+    type: "LLM"
+    rollout_folder: "Qwen2.5-3B-Instruct"
+  mathvista_vlm:
+    name: "Qwen/Qwen2.5-VL-3B-Instruct"
+    dataset: "MathVista"
+    type: "VLM"
+    rollout_folder: "Qwen2.5-VL-3B-Instruct"
+
+offline_eval:
+  budgets: [1, 2, 4, 8, 16, 32]
+  num_permutations: 10
+  dev_split_size: 200
+  eval_split_size: 800
+  bootstrap_resamples: 1000
+  confidence_level: 0.95
+
+adaptive_sampling:
+  checkpoints: [4, 8, 16]
+  max_candidates: 32
+  agreement_thresholds: [0.50, 0.625, 0.75, 0.875, 1.00]
+  quality_margins: [0.00, 0.10, 0.25, 0.50]
+  dev_accuracy_margin_pp: 1.0
+
+live_generation:
+  model_name: "Qwen/Qwen2.5-3B-Instruct"
+  num_questions: 50
+  batch_size: 1
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  repetition_penalty: 1.0
+  single_response_max_tokens: 3072
+  parallel_response_max_tokens: 1024
+  refinement_revision_max_tokens: 2048
+  system_prompt: "You are a helpful assistant."
