@@ -1,30 +1,31 @@
 """
-Modal cloud execution orchestrator for ATML PA3 - Task 1.
+Modal cloud execution orchestrator for ATML PA3 (Task 1 & Task 2).
 Leverages Modal (modal.com) serverless GPU infrastructure with persistent volume storage.
 
 Features:
-- Persistent Volume ('pa3-volume') mounted at /root/volume for 100% durable checkpoints, cache & results.
+- Persistent Volume ("pa3-volume") mounted at /root/volume for 100% durable checkpoints, cache & results.
+- Task 1: LLM Fine-Tuning (Full FT, L2-SP, LoRA-4, LoRA-16, OPLoRA-16, GSM8K, HellaSwag, BoolQ, ARC-Easy).
+- Task 2: VLM Visual Grounding (SigLIP-224, 2-Layer MLP Connector, Qwen3-0.6B LoRA, 3-Stage Curriculum, 4 Conditions).
 - Unbuffered real-time stdout streaming of every single training update and evaluation step.
 - Redundant multi-format persistence: JSON, JSONL, CSV, and automatic volume commits.
-- Native lm-evaluation-harness (lm-eval) support across GSM8K, HellaSwag, BoolQ, and ARC-Easy.
-- Multiple GPU configurations: NVIDIA A10G (default, 24GB, cost-efficient) or A100 (high-throughput).
+- Optimized for NVIDIA A100 (high memory bandwidth & throughput) and single RTX 6000 Ada.
 - Built-in download entrypoint to sync all results to local workspace.
 
 Usage:
   # 1. Verification / Dry-run
   modal run modal_run.py --dry-run
 
-  # 2. Run complete Task 1 pipeline on NVIDIA A10G (default)
-  modal run modal_run.py
+  # 2. Run complete Task 2 pipeline on NVIDIA A100 (Default)
+  modal run modal_run.py --task task2 --gpu A100
 
-  # 3. Run on NVIDIA A100 GPU
-  modal run modal_run.py --gpu A100
+  # 3. Run specific stages of Task 2 (e.g. stage1, stage2, stage3, evaluate)
+  modal run modal_run.py --task task2 --stage "stage1 stage2 stage3 evaluate"
 
-  # 4. Run a specific stage (e.g. baseline, train_full_ft, train_l2sp, diagnostics, qualitative)
-  modal run modal_run.py --stage train_full_ft
+  # 4. Run Task 1 on NVIDIA RTX 6000 Ada
+  modal run modal_run.py --task task1 --gpu RTX-PRO-6000
 
   # 5. Download all results from cloud volume to local repository
-  modal run modal_run.py::download_results
+  modal run modal_run.py --download
 """
 
 import os
@@ -33,7 +34,7 @@ import time
 import modal
 
 # 1. Define the Modal App
-app = modal.App("atml-pa3-task1")
+app = modal.App("atml-pa3")
 
 # 2. Persistent Volume: durable cloud storage across runs and restarts
 volume = modal.Volume.from_name("pa3-volume", create_if_missing=True)
@@ -45,6 +46,8 @@ image = (
     .apt_install("git", "curl", "procps")
     .pip_install(
         "torch>=2.4.0",
+        "torchvision>=0.19.0",
+        "pillow>=10.0.0",
         "transformers>=4.45.0",
         "tokenizers>=0.20.0",
         "datasets>=2.20.0",
@@ -80,6 +83,7 @@ image = (
 
 
 def _execute_pipeline_in_container(
+    task: str,
     stage: str,
     config_path: str,
     skip_eval: bool,
@@ -101,10 +105,11 @@ def _execute_pipeline_in_container(
     os.environ["MODAL_VOLUME_NAME"] = "pa3-volume"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    print(f"\n{'='*80}", flush=True)
-    print(f"MODAL CLOUD PIPELINE: Task 1 on {gpu_label}", flush=True)
-    print(f"Target Stage: {stage} | Config: {config_path}", flush=True)
-    print(f"{'='*80}", flush=True)
+    task_normalized = task.lower().strip()
+    print("\n" + "=" * 80, flush=True)
+    print(f"MODAL CLOUD PIPELINE: {task_normalized.upper()} on {gpu_label}", flush=True)
+    print(f"Target Stage(s): {stage} | Config: {config_path}", flush=True)
+    print("=" * 80, flush=True)
 
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
@@ -112,9 +117,18 @@ def _execute_pipeline_in_container(
         print(f"[Hardware] GPU Active: {gpu_name} ({vram_gb:.2f} GB VRAM)", flush=True)
 
     # Ensure volume directory structures exist
-    os.makedirs(f"{VOLUME_MOUNT_PATH}/data_cache/task1", exist_ok=True)
-    os.makedirs(f"{VOLUME_MOUNT_PATH}/checkpoints/task1", exist_ok=True)
-    os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task1", exist_ok=True)
+    if task_normalized == "task1":
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/data_cache/task1", exist_ok=True)
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/checkpoints/task1", exist_ok=True)
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task1", exist_ok=True)
+        module_name = "task1.run_all"
+    else:
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/data_cache/task2", exist_ok=True)
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/data_cache/task2/siglip_features", exist_ok=True)
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/checkpoints/task2", exist_ok=True)
+        os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task2", exist_ok=True)
+        module_name = "task2.run_all"
+
     volume.commit()
 
     stage_tokens = stage.replace(",", " ").split() if isinstance(stage, str) else list(stage)
@@ -122,15 +136,16 @@ def _execute_pipeline_in_container(
         sys.executable,
         "-u",
         "-m",
-        "task1.run_all",
+        module_name,
         "--config",
         config_path,
         "--stages",
         *stage_tokens,
-        "--single-gpu",
     ]
-    if skip_eval:
-        cmd.append("--skip-eval")
+    if task_normalized == "task1":
+        cmd.append("--single-gpu")
+        if skip_eval:
+            cmd.append("--skip-eval")
 
     print(f"[Command] {' '.join(cmd)}\n", flush=True)
 
@@ -143,7 +158,7 @@ def _execute_pipeline_in_container(
         bufsize=1,
     )
 
-    # Stream every single output line directly to Modal's logs
+    # Stream every single output line directly to Modal logs
     for line in iter(process.stdout.readline, ""):
         sys.stdout.write(line)
         sys.stdout.flush()
@@ -162,23 +177,88 @@ def _execute_pipeline_in_container(
     print("[Modal Pipeline] Durable cloud volume 'pa3-volume' successfully committed.", flush=True)
 
     if return_code != 0:
-        raise RuntimeError(f"Task 1 execution failed with exit code {return_code}")
+        raise RuntimeError(f"{task_normalized.upper()} execution failed with exit code {return_code}")
 
 
-# 4. Decorated Cloud Functions for Different GPU Configurations
+# ==============================================================================
+# Cloud Functions for Task 2 (VLM & Grounding) - Single GPU Invariant Enforced
+# ==============================================================================
+@app.function(
+    image=image,
+    gpu="A100",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_task2_a100(
+    stage: str = "all",
+    config_path: str = "configs/modal_task2_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run Task 2 on NVIDIA A100 (40GB/80GB) - optimized throughput."""
+    _execute_pipeline_in_container("task2", stage, config_path, skip_eval, "NVIDIA A100")
+
+
+@app.function(
+    image=image,
+    gpu="RTX-PRO-6000",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_task2_rtx6000(
+    stage: str = "all",
+    config_path: str = "configs/modal_task2_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run Task 2 on Single NVIDIA RTX PRO 6000 Ada (48GB VRAM)."""
+    _execute_pipeline_in_container("task2", stage, config_path, skip_eval, "Single NVIDIA RTX PRO 6000 (48GB)")
+
+
+@app.function(
+    image=image,
+    gpu="H100",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_task2_h100(
+    stage: str = "all",
+    config_path: str = "configs/modal_task2_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run Task 2 on NVIDIA H100 (80GB VRAM)."""
+    _execute_pipeline_in_container("task2", stage, config_path, skip_eval, "NVIDIA H100 (80GB)")
+
+
 @app.function(
     image=image,
     gpu="A10G",
     timeout=86400,
     volumes={VOLUME_MOUNT_PATH: volume},
 )
-def run_pipeline_a10g(
+def run_task2_a10g(
+    stage: str = "all",
+    config_path: str = "configs/modal_task2_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run Task 2 on NVIDIA A10G (24GB VRAM)."""
+    _execute_pipeline_in_container("task2", stage, config_path, skip_eval, "NVIDIA A10G (24GB)")
+
+
+# ==============================================================================
+# Cloud Functions for Task 1 (LLM Fine-Tuning)
+# ==============================================================================
+@app.function(
+    image=image,
+    gpu="RTX-PRO-6000",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_pipeline_rtx6000(
     stage: str = "all",
     config_path: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
 ):
-    """Run pipeline on NVIDIA A10G (24GB VRAM) - standard, highly cost-efficient."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA A10G (24GB)")
+    """Run Task 1 on Single NVIDIA RTX PRO 6000 Ada (48GB VRAM)."""
+    _execute_pipeline_in_container("task1", stage, config_path, skip_eval, "Single NVIDIA RTX PRO 6000 (48GB)")
 
 
 @app.function(
@@ -192,38 +272,8 @@ def run_pipeline_a100(
     config_path: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
 ):
-    """Run pipeline on NVIDIA A100 (40GB/80GB VRAM) - maximum throughput."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA A100")
-
-
-@app.function(
-    image=image,
-    gpu="RTX-PRO-6000",
-    timeout=86400,
-    volumes={VOLUME_MOUNT_PATH: volume},
-)
-def run_pipeline_rtx6000(
-    stage: str = "all",
-    config_path: str = "configs/modal_config.yaml",
-    skip_eval: bool = False,
-):
-    """Run pipeline on NVIDIA RTX PRO 6000 Ada (48GB VRAM)."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA RTX PRO 6000 (48GB)")
-
-
-@app.function(
-    image=image,
-    gpu="RTX-PRO-6000:2",
-    timeout=86400,
-    volumes={VOLUME_MOUNT_PATH: volume},
-)
-def run_pipeline_rtx6000_x2(
-    stage: str = "all",
-    config_path: str = "configs/modal_config.yaml",
-    skip_eval: bool = False,
-):
-    """Run pipeline on Dual NVIDIA RTX PRO 6000 Ada (96GB VRAM total)."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "Dual NVIDIA RTX PRO 6000 (96GB)")
+    """Run Task 1 on NVIDIA A100 (40GB/80GB VRAM)."""
+    _execute_pipeline_in_container("task1", stage, config_path, skip_eval, "NVIDIA A100")
 
 
 @app.function(
@@ -237,8 +287,23 @@ def run_pipeline_h100(
     config_path: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
 ):
-    """Run pipeline on NVIDIA H100 (80GB VRAM)."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA H100 (80GB)")
+    """Run Task 1 on NVIDIA H100 (80GB VRAM)."""
+    _execute_pipeline_in_container("task1", stage, config_path, skip_eval, "NVIDIA H100 (80GB)")
+
+
+@app.function(
+    image=image,
+    gpu="A10G",
+    timeout=86400,
+    volumes={VOLUME_MOUNT_PATH: volume},
+)
+def run_pipeline_a10g(
+    stage: str = "all",
+    config_path: str = "configs/modal_config.yaml",
+    skip_eval: bool = False,
+):
+    """Run Task 1 on NVIDIA A10G (24GB VRAM)."""
+    _execute_pipeline_in_container("task1", stage, config_path, skip_eval, "NVIDIA A10G (24GB)")
 
 
 @app.function(
@@ -252,10 +317,13 @@ def run_pipeline_l4(
     config_path: str = "configs/modal_config.yaml",
     skip_eval: bool = False,
 ):
-    """Run pipeline on NVIDIA L4 (24GB Ada Lovelace) - ultra low cost."""
-    _execute_pipeline_in_container(stage, config_path, skip_eval, "NVIDIA L4 (24GB)")
+    """Run Task 1 on NVIDIA L4 (24GB Ada Lovelace)."""
+    _execute_pipeline_in_container("task1", stage, config_path, skip_eval, "NVIDIA L4 (24GB)")
 
 
+# ==============================================================================
+# Verification & Utility Cloud Functions
+# ==============================================================================
 @app.function(
     image=image,
     gpu="A10G",
@@ -267,6 +335,8 @@ def check_environment():
     import os
     import sys
     import torch
+    import torchvision
+    import PIL
     import transformers
     import lm_eval
 
@@ -279,6 +349,8 @@ def check_environment():
         print(f"GPU Device: {torch.cuda.get_device_name(0)}", flush=True)
         vram = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         print(f"GPU VRAM: {vram:.2f} GB", flush=True)
+    print(f"Torchvision: {torchvision.__version__}", flush=True)
+    print(f"Pillow: {PIL.__version__}", flush=True)
     print(f"Transformers: {transformers.__version__}", flush=True)
     print(f"LM-Eval: {lm_eval.__version__}", flush=True)
 
@@ -295,7 +367,7 @@ def check_environment():
 
 @app.function(image=image, volumes={VOLUME_MOUNT_PATH: volume})
 def list_volume_artifacts(include_checkpoints: bool = False) -> list:
-    """List result files stored in the persistent volume (excluding heavy checkpoints by default)."""
+    """List result files stored in persistent volume (excluding heavy model weights/caches by default)."""
     import os
 
     volume.reload()
@@ -304,13 +376,21 @@ def list_volume_artifacts(include_checkpoints: bool = False) -> list:
         for f in files:
             full_p = os.path.join(root, f)
             rel_p = os.path.relpath(full_p, VOLUME_MOUNT_PATH)
-            # Exclude massive .pt checkpoints and data caches by default
+            # Exclude massive .pt checkpoints, safetensors, and data caches by default
             if not include_checkpoints:
-                if f.endswith(".pt") or f.endswith(".bin") or "checkpoints" in rel_p or "data_cache" in rel_p:
+                if (
+                    f.endswith(".pt")
+                    or f.endswith(".bin")
+                    or f.endswith(".safetensors")
+                    or f.endswith(".npy")
+                    or f.endswith(".arrow")
+                    or "checkpoints" in rel_p
+                    or "data_cache" in rel_p
+                ):
                     continue
             sz_mb = os.path.getsize(full_p) / (1024 * 1024)
             collected.append((rel_p, sz_mb))
-    return collected
+    return sorted(collected, key=lambda x: x[0])
 
 
 @app.function(image=image, volumes={VOLUME_MOUNT_PATH: volume})
@@ -324,12 +404,15 @@ def fetch_volume_file(rel_path: str) -> bytes:
         return f.read()
 
 
-# 6. Single Local Entrypoint: CLI Interface
+# ==============================================================================
+# Single Local Entrypoint: CLI Interface
+# ==============================================================================
 @app.local_entrypoint()
 def main(
+    task: str = "task2",
     stage: str = "all",
-    gpu: str = "RTX-PRO-6000",
-    config: str = "configs/modal_config.yaml",
+    gpu: str = "A100",
+    config: str = "",
     skip_eval: bool = False,
     dry_run: bool = False,
     download: bool = False,
@@ -339,11 +422,14 @@ def main(
     """
     Main entrypoint when running `modal run modal_run.py`.
     Parameters:
+      --task: Pipeline target [task1, task2] (Default: task2)
+      --stage: Stage to run:
+               For task1: [all, baseline, train_full_ft, train_l2sp, train_lora4, train_lora16, train_oplora, diagnostics, qualitative, synthesize]
+               For task2: [all, prepare_data, cache_features, stage1, stage2, stage3, evaluate, synthesize]
+      --gpu: Hardware accelerator [A100, RTX-PRO-6000, H100, A10G, L4] (Default: A100, strictly 1 GPU)
+      --config: Path to configuration YAML (Defaults to modal_task2_config.yaml or modal_config.yaml)
+      --skip-eval: Skip evaluation (Task 1 debug flag)
       --dry-run: Fast container & volume test without running training
-      --stage: Stage to run [all, baseline, train_full_ft, train_l2sp, train_lora4, train_lora16, train_oplora, diagnostics, qualitative, synthesize]
-      --gpu: Hardware accelerator [RTX-PRO-6000, A10G, A100, L4] (Default: RTX-PRO-6000)
-      --config: Path to configuration YAML (Default: configs/modal_config.yaml)
-      --skip-eval: Skip benchmark evaluation (debug flag)
       --download: Download results, metrics, and logs from cloud volume to local disk (skips heavy checkpoints by default)
       --include-checkpoints: Include heavy 6GB+ .pt checkpoints during download
       --dest-dir: Local destination directory for downloaded files (Default: .)
@@ -372,19 +458,45 @@ def main(
         check_environment.remote()
         return
 
-    gpu_choice = gpu.upper()
-    print(f"[Local CLI] Dispatching Task 1 to Modal Cloud GPU: {gpu_choice} | Stage: {stage}")
+    task_normalized = task.lower().strip()
+    gpu_choice = gpu.upper().strip()
 
-    if "6000:2" in gpu_choice or "90" in gpu_choice or "96" in gpu_choice or "DUAL" in gpu_choice:
-        run_pipeline_rtx6000_x2.remote(stage=stage, config_path=config, skip_eval=skip_eval)
-    elif "H100" in gpu_choice:
-        run_pipeline_h100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
-    elif "6000" in gpu_choice or "RTX" in gpu_choice:
-        run_pipeline_rtx6000.remote(stage=stage, config_path=config, skip_eval=skip_eval)
-    elif "A100" in gpu_choice:
-        run_pipeline_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
-    elif "L4" in gpu_choice:
-        run_pipeline_l4.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+    # Safety: Enforce strictly single GPU to protect compute credits
+    if ":2" in gpu_choice or ":" in gpu_choice:
+        base_gpu = gpu_choice.split(":")[0]
+        print(f"[Local CLI Safety] Multi-GPU '{gpu_choice}' requested, but single GPU invariant is enforced to prevent accidental billing.")
+        print(f"[Local CLI Safety] Normalizing to single GPU: '{base_gpu}'")
+        gpu_choice = base_gpu
+
+    # Resolve default configuration
+    if not config:
+        if task_normalized == "task1":
+            config = "configs/modal_config.yaml"
+        else:
+            config = "configs/modal_task2_config.yaml"
+
+    print(f"[Local CLI] Dispatching {task_normalized.upper()} to Modal Cloud GPU: {gpu_choice} | Stage(s): {stage} | Config: {config}")
+
+    if task_normalized == "task2":
+        if "A100" in gpu_choice:
+            run_task2_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "H100" in gpu_choice:
+            run_task2_h100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "6000" in gpu_choice or "RTX" in gpu_choice:
+            run_task2_rtx6000.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "A10G" in gpu_choice:
+            run_task2_a10g.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        else:
+            run_task2_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
     else:
-        run_pipeline_a10g.remote(stage=stage, config_path=config, skip_eval=skip_eval)
-
+        # Task 1
+        if "6000" in gpu_choice or "RTX" in gpu_choice:
+            run_pipeline_rtx6000.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "H100" in gpu_choice:
+            run_pipeline_h100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "A100" in gpu_choice:
+            run_pipeline_a100.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        elif "L4" in gpu_choice:
+            run_pipeline_l4.remote(stage=stage, config_path=config, skip_eval=skip_eval)
+        else:
+            run_pipeline_a10g.remote(stage=stage, config_path=config, skip_eval=skip_eval)

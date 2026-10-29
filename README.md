@@ -190,3 +190,41 @@ Upon completion, all required evidence is automatically generated in `results/ta
 - `diagnostics.json`: $\rho_k$, $\eta$, and $R(z)$ on math vs non-math prompts across layers 0, 13, and 27.
 - `qualitative_responses.json`: Full 168-response catalog grouped by question ID and format.
 - `qualitative_annotations.md`: Markdown table auditing the 42-response subset (first and last question across all 3 formats and 7 conditions) for format compliance, coherence, repetition, unnecessary mathematical framing, and truncation flags.
+
+---
+
+## 8. Task 2: Vision-Language Models & Visual Grounding (Modal Cloud Execution)
+
+Task 2 implements multimodal instruction tuning with SigLIP-224 vision encoder, a 2-layer trainable MLP connector, and Qwen3-0.6B LoRA, evaluated across 4 image conditions (correct, complementary swap, mismatched, no-image) with 4,000 bootstrap resamples.
+
+### Optimizations for NVIDIA A100 on Modal
+- **Pre-Cached FP16 Patch Features**: SigLIP extracts and normalizes 196 patch features in FP16, permanently cached to `/root/volume/data_cache/task2/siglip_features`. The heavy vision encoder is completely unloaded from GPU memory before Qwen initializes.
+- **A100 Tensor Cores & High Memory Bandwidth**: Microbatch 8, gradient accumulation 2 (effective batch 16). With A100's high memory bandwidth (1.5–2.0 TB/s), training runs at near-memory-bound speeds.
+- **Durable Checkpointing**: Model states and connector weights are committed to `pa3-volume` every 250 updates and at stage endpoints (2250, 3750, 4500).
+
+### Launching Task 2 on Modal Cloud
+```bash
+# 1. Run complete Task 2 pipeline on NVIDIA A100 (Default):
+modal run modal_run.py --task task2 --gpu A100
+
+# 2. Run specific stages:
+modal run modal_run.py --task task2 --stage "stage1 stage2"
+modal run modal_run.py --task task2 --stage "stage3 evaluate synthesize"
+
+# 3. Run on single NVIDIA RTX 6000 Ada:
+modal run modal_run.py --task task2 --gpu RTX-PRO-6000
+
+# 4. Download all Task 2 and Task 1 results to local workspace:
+modal run modal_run.py --download
+```
+
+### Available Stages for Task 2
+`[all, prepare_data, cache_features, stage1, stage2, stage3, evaluate, synthesize]`
+
+### Output Deliverables in `results/task2/`
+- `stage_metrics.json`: Final training metrics across all stages.
+- `training_curves.csv`: Per-update step loss, learning rates, gradient norms, and visual-text magnitude ratios.
+- `evaluation_summary.json`: Detailed 4-condition scores, pair accuracies, and 95% bootstrap confidence intervals.
+- `eval_table_checkpoint_*.json`: Intermediate dev checkpoints at 500, 1000, 1500, etc.
+- `task2_final_report.md`: Markdown summary tables.
+
