@@ -1,10 +1,8 @@
-# ATML PA3 - Deep Learning Pipelines: Task 1 & Task 2
+# ATML PA3 - Task 1: Large Language Model Fine-Tuning
 
-Modular, high-performance implementation for **Programming Assignment 3** of EE-5102 / CS-6304 Advanced Topics in Machine Learning:
-- **Task 1**: Large Language Model Fine-Tuning (Full FT, L2-SP, LoRA-4, LoRA-16, OPLoRA-16)
-- **Task 2**: Vision-Language Models and Visual Grounding (SigLIP-224, 2-Layer MLP Connector, Qwen3-0.6B LoRA, 3-Stage Curriculum, 4-Condition Evaluation)
+Modular, high-performance implementation for **Task 1: Large Language Model Fine-Tuning** of EE-5102 / CS-6304 Advanced Topics in Machine Learning (Programming Assignment 3).
 
-Optimized for **NVIDIA A100 / RTX 6000 Ada / Hopper Architectures** with FP16 AMP, flash attention, dynamic batching, and serverless Modal cloud execution.
+Optimized for **NVIDIA RTX 6000 Pro Blackwell / Ada / Hopper Architectures** to complete all 5 training runs, checkpointing, diagnostics, qualitative analysis, and 7 benchmark evaluations in under **30–35 minutes**.
 
 ---
 
