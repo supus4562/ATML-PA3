@@ -63,6 +63,7 @@ image = (
         "tqdm>=4.66.0",
         "safetensors>=0.4.0",
         "scikit-learn>=1.4.0",
+        "sentencepiece>=0.2.0",
     )
     .add_local_dir(
         ".",

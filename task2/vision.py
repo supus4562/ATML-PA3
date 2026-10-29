@@ -30,10 +30,10 @@ class SigLIPFeatureExtractor:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dtype = dtype
 
-        from transformers import AutoProcessor, SiglipVisionModel
+        from transformers import AutoImageProcessor, SiglipVisionModel
 
         print(f"[SigLIP] Loading frozen vision encoder: {model_name} on {self.device} ({dtype})...")
-        self.processor = AutoProcessor.from_pretrained(model_name)
+        self.processor = AutoImageProcessor.from_pretrained(model_name)
         self.model = SiglipVisionModel.from_pretrained(
             model_name,
             torch_dtype=dtype,
