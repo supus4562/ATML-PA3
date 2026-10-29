@@ -55,10 +55,16 @@ def run_live_refinement_experiment(
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     torch_dtype = torch.float16 if dev.type == "cuda" else torch.float32
+    model_kwargs: Dict[str, Any] = {
+        "torch_dtype": torch_dtype,
+        "trust_remote_code": True,
+    }
+    if dev.type == "cuda":
+        model_kwargs["attn_implementation"] = "sdpa"
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch_dtype,
-        trust_remote_code=True,
+        **model_kwargs,
     ).to(dev)
     model.eval()
 

@@ -12,6 +12,52 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 import numpy as np
 import pandas as pd
 
+try:
+    from math_verify import parse, verify
+    HAS_MATH_VERIFY = True
+except ImportError:
+    HAS_MATH_VERIFY = False
+
+
+def _safe_float_list(val: Any) -> List[float]:
+    """Safely extracts a list of floats from a scalar, list, or numpy/arrow array."""
+    if val is None:
+        return []
+    if isinstance(val, (float, int)):
+        if math.isnan(val):
+            return []
+        return [float(val)]
+    if hasattr(val, "tolist"):
+        val = val.tolist()
+    if isinstance(val, (list, tuple, np.ndarray)):
+        out = []
+        for x in val:
+            if x is not None and not (isinstance(x, float) and math.isnan(x)):
+                try:
+                    out.append(float(x))
+                except (ValueError, TypeError):
+                    pass
+        return out
+    return []
+
+
+def _safe_int_list(val: Any) -> List[int]:
+    """Safely extracts a list of ints from a scalar, list, or numpy/arrow array."""
+    if val is None:
+        return []
+    if hasattr(val, "tolist"):
+        val = val.tolist()
+    if isinstance(val, (list, tuple, np.ndarray)):
+        out = []
+        for x in val:
+            if x is not None:
+                try:
+                    out.append(int(x))
+                except (ValueError, TypeError):
+                    pass
+        return out
+    return []
+
 
 @dataclass
 class RolloutItem:
@@ -138,6 +184,17 @@ def check_answer_correctness(
         return False
 
     if dataset == "MATH":
+        if HAS_MATH_VERIFY:
+            try:
+                g_str = str(gold).strip()
+                p_str = str(predicted).strip()
+                g_parsed = parse(f"${g_str}$" if "$" not in g_str else g_str)
+                p_parsed = parse(f"${p_str}$" if "$" not in p_str else p_str)
+                if verify(g_parsed, p_parsed):
+                    return True
+            except Exception:
+                pass
+
         norm_pred = normalize_math_answer(predicted)
         norm_gold = normalize_math_answer(gold)
         if norm_pred == "NO_ANSWER" or norm_gold == "NO_ANSWER":
@@ -219,50 +276,71 @@ def load_task3_dataset(
     if not os.path.exists(gen_path) or not os.path.exists(prob_path):
         raise FileNotFoundError(f"Missing required parquet files in {folder_path} (expected generations.parquet and probability_metrics.parquet)")
 
+    def _standardize_df(df: pd.DataFrame) -> pd.DataFrame:
+        col_map = {}
+        for c in df.columns:
+            cl = str(c).lower().strip()
+            if cl in ["sample_id", "question_id", "qid", "sample", "problem_id"]:
+                col_map[c] = "sample_id"
+            elif cl in ["rollout_id", "candidate_id", "rollout", "sample_idx"]:
+                col_map[c] = "rollout_id"
+        if col_map:
+            df = df.rename(columns=col_map)
+        if "dataset" not in df.columns:
+            df["dataset"] = dataset_name
+        df["sample_id"] = df["sample_id"].astype(str)
+        df["rollout_id"] = df["rollout_id"].astype(int)
+        return df
+
     print(f"[Data] Reading {gen_path}...")
-    df_gen = pd.read_parquet(gen_path)
+    df_gen = _standardize_df(pd.read_parquet(gen_path))
     print(f"[Data] Reading {prob_path}...")
-    df_prob = pd.read_parquet(prob_path)
+    df_prob = _standardize_df(pd.read_parquet(prob_path))
 
     join_cols = ["dataset", "sample_id", "rollout_id"]
-    for col in join_cols:
-        if col not in df_gen.columns:
-            # Fallback if sample_id / rollout_id named slightly differently
-            if col == "sample_id" and "question_id" in df_gen.columns:
-                df_gen["sample_id"] = df_gen["question_id"].astype(str)
-            if col == "dataset":
-                df_gen["dataset"] = dataset_name
-
-    # Merge generations and probabilities
     df_merged = pd.merge(df_gen, df_prob, on=join_cols, how="inner")
 
     has_attention = os.path.exists(attn_path)
     if has_attention:
         print(f"[Data] Reading {attn_path}...")
-        df_attn = pd.read_parquet(attn_path)
+        df_attn = _standardize_df(pd.read_parquet(attn_path))
         df_merged = pd.merge(df_merged, df_attn, on=join_cols, how="left")
 
     print(f"[Data] Loaded {len(df_merged)} merged rollouts for {dataset_name}.")
+
+    def _get_field(row: Any, keys: List[str], default: Any = None) -> Any:
+        for k in keys:
+            if k in row and row[k] is not None:
+                val = row[k]
+                if isinstance(val, float) and math.isnan(val):
+                    continue
+                return val
+        return default
 
     grouped: Dict[str, List[RolloutItem]] = {}
     for _, row in df_merged.iterrows():
         s_id = str(row["sample_id"])
         r_id = int(row["rollout_id"])
 
-        text = str(row.get("text", row.get("generation", "")))
-        token_ids = list(row.get("token_ids", []))
-        length = int(row.get("length", len(token_ids)))
-        extracted_ans = str(row.get("extracted_answer", ""))
-        gold_ans = str(row.get("gold_answer", ""))
+        text = str(_get_field(row, ["text", "generation", "response", "completion"], ""))
+        token_ids = _safe_int_list(_get_field(row, ["token_ids", "tokens"]))
+        length_val = _get_field(row, ["length", "token_count"])
+        length = int(length_val) if length_val is not None else len(token_ids)
+        extracted_ans = str(_get_field(row, ["extracted_answer", "answer", "prediction"], ""))
+        gold_ans = str(_get_field(row, ["gold_answer", "ground_truth", "reference", "target"], ""))
 
-        logp_vals = [float(x) for x in row.get("logp", [])]
-        kl_vals = [float(x) for x in row.get("kl_u_p", [])]
+        logp_vals = _safe_float_list(_get_field(row, ["logp", "token_logp", "sampled_logp"]))
+        kl_vals = _safe_float_list(_get_field(row, ["kl_u_p", "kl", "self_certainty"]))
 
-        a_img = [float(x) for x in row.get("Aimage", [])] if "Aimage" in row and row["Aimage"] is not None else None
-        a_prm = [float(x) for x in row.get("Aprompt", [])] if "Aprompt" in row and row["Aprompt"] is not None else None
-        a_gen = [float(x) for x in row.get("Agenerated", [])] if "Agenerated" in row and row["Agenerated"] is not None else None
+        a_img_val = _get_field(row, ["Aimage", "a_image", "A_image", "image_attention", "image"])
+        a_prm_val = _get_field(row, ["Aprompt", "a_prompt", "A_prompt", "prompt_attention", "prompt"])
+        a_gen_val = _get_field(row, ["Agenerated", "a_generated", "A_generated", "generated_attention", "generated"])
 
-        q_meta = row.get("question_metadata", None)
+        a_img = _safe_float_list(a_img_val) if a_img_val is not None else None
+        a_prm = _safe_float_list(a_prm_val) if a_prm_val is not None else None
+        a_gen = _safe_float_list(a_gen_val) if a_gen_val is not None else None
+
+        q_meta = _get_field(row, ["question_metadata", "metadata", "meta"])
         if isinstance(q_meta, str):
             try:
                 q_meta = json.loads(q_meta)

@@ -72,8 +72,12 @@ def compute_visconf_scores(
     if not all_kl:
         q05, q95 = 0.0, 1.0
     else:
-        q05 = float(np.percentile(all_kl, 5, method="linear"))
-        q95 = float(np.percentile(all_kl, 95, method="linear"))
+        try:
+            q05 = float(np.percentile(all_kl, 5, method="linear"))
+            q95 = float(np.percentile(all_kl, 95, method="linear"))
+        except TypeError:
+            q05 = float(np.percentile(all_kl, 5, interpolation="linear"))
+            q95 = float(np.percentile(all_kl, 95, interpolation="linear"))
 
     denom = max(q95 - q05, 1e-8)
 

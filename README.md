@@ -228,3 +228,73 @@ modal run modal_run.py --download
 - `eval_table_checkpoint_*.json`: Intermediate dev checkpoints at 500, 1000, 1500, etc.
 - `task2_final_report.md`: Markdown summary tables.
 
+---
+
+## 9. Task 3: Test-Time Compute (Sampling, Selection, and Adaptive Inference)
+
+Task 3 investigates test-time compute allocation across offline rollout selection, signal analysis, live sequential refinement, and adaptive stopping.
+
+### Mathematical Formulations & Invariants
+
+| Category | Invariant Rule | Exact Formula & Implementation Detail |
+| :--- | :--- | :--- |
+| **Data & Splits** | Seed `6304` Isolation | Lexicographically sorted 1,000 question IDs permuted via `np.random.default_rng(6304)`. First 200 = Dev, remaining 800 = Eval. First 50 MATH eval questions = Live subtask. |
+| **Answer Normalization** | Zero Data Leakage | Normalized without consulting gold answers (`math-verify` / LaTeX rules for MATH, answer-type & choice letters for MathVista). `NO_ANSWER` mapped and retained. |
+| **Candidate Budgets** | Nested Prefixes | Budgets $N \in \{1, 2, 4, 8, 16, 32\}$. 10 seeded random permutations per question; nested prefixes reused across all rules and stopping policies. |
+| **Self-Certainty** | Distributional Divergence | $K_i = \frac{1}{T_i} \sum_{t=1}^{T_i} D_{KL}(U \parallel p_{i,t})$ from pre-sampling token distributions `kl_u_p`. |
+| **Visual Engagement** | Normalized Attention Mass | $V_i = \frac{1}{T_i} \sum_{t=1}^{T_i} \frac{A_{i,t}^{\text{img}}}{A_{i,t}^{\text{img}} + A_{i,t}^{\text{prm}} + A_{i,t}^{\text{gen}}}$. Excludes special positions and normalizes sum. |
+| **VisConf Calibration** | Candidate-Calibrated | $c_{i,t} = \text{clip}_{[0,1]}\left(\frac{k_{i,t} - Q_{.05}(G)}{\max(Q_{.95}(G) - Q_{.05}(G), 10^{-8})}\right)$ using linear percentiles on revealed prefix $G$. $Z_i = V_i C_i$. |
+| **Tokenwise Fusion** | Covariance Ablation | $Z_i^{\text{token}} = \frac{1}{T_i} \sum_{t=1}^{T_i} c_{i,t} v_{i,t}$ with covariance $Z_i^{\text{token}} - Z_i = \text{Cov}_t(c_{i,t}, v_{i,t})$. |
+| **Rank-Weighted Consensus** | RWC | Weights $w_i = \frac{N - r_i}{N - 1}$ with descending average rank $r_i$ (ties get average ranks). Ties between answers broken by earliest supporting candidate. |
+| **Failure Decomposition** | Sampling vs Selection | Categorizes incorrect predictions into sampling failures (no correct rollout in pool) vs selection failures (correct rollout was available but missed). |
+| **Live Refinement** | 50 MATH Questions | `Qwen/Qwen2.5-3B-Instruct` FP16 with SDPA. Single (3,072 cap) vs Parallel (3 x 1,024 + SC) vs Sequential Refinement (1,024 initial + 2,048 critique/revision). Balanced-brace `\boxed{}` parser. |
+| **Adaptive Stopping** | Checkpoints $\{4, 8, 16, 32\}$ | Agreement ($\ge \tau$) and Quality-Aware ($\ge \tau$, SC winner == RWC winner, RWC margin $\ge \gamma$). Dev grid search for lowest token cost within $1.0\text{ pp}$ of fixed-32 SC. |
+| **Confidence Intervals** | 1,000 Paired Resamples | 1,000 paired question-level bootstrap resamples for 95% CIs on accuracy differences. |
+
+### Running Task 3 Locally
+
+```bash
+# 1. Full pipeline (Steps 1 through 6)
+bash run_task3.sh
+
+# 2. Or invoke Python module directly:
+python3 -m task3.run_all --config configs/task3_config.yaml
+
+# 3. Run specific stages:
+python3 -m task3.run_all --stages step1_2
+python3 -m task3.run_all --stages step3
+python3 -m task3.run_all --stages step4_live
+python3 -m task3.run_all --stages step5_adaptive synthesize
+```
+
+### Running Task 3 on Modal Cloud (NVIDIA H100 80GB)
+
+```bash
+# 1. Full Task 3 pipeline on NVIDIA H100 (Default for Task 3):
+modal run modal_run.py --task task3 --gpu H100
+
+# 2. Run on NVIDIA A100 or Single RTX 6000 Ada:
+modal run modal_run.py --task task3 --gpu A100
+modal run modal_run.py --task task3 --gpu RTX-PRO-6000
+
+# 3. Run individual stages on cloud:
+modal run modal_run.py --task task3 --stage step1_2
+modal run modal_run.py --task task3 --stage step3
+modal run modal_run.py --task task3 --stage step4_live
+modal run modal_run.py --task task3 --stage step5_adaptive
+
+# 4. Download all generated deliverables from cloud volume to local repository:
+modal run modal_run.py --download
+```
+
+### Available Stages for Task 3
+`[all, step1_2, step3, step4_live, step5_adaptive, synthesize]`
+
+### Output Deliverables in `results/task3/`
+- `repeated_sampling_results.json`: Accuracy, oracle coverage, distinct answer groups, sampling vs selection failures, and 1,000 paired bootstrap 95% CIs across budgets $N \in \{1, 2, 4, 8, 16, 32\}$ for MATH and MathVista.
+- `signal_analysis.json`: Step 3 within-question quartile contrasts, length correlations, shortest-rollout length controls, tokenwise vs trajectory-level fusion comparison ($Z_i^{\text{token}} - Z_i$), and MathVista confidence-vision Pearson correlations $r(c_{i,t}, v_{i,t})$.
+- `live_refinement_results.json`: Step 4 comparison across Single (3,072), Parallel (3 x 1,024), and Sequential Refinement on 50 MATH evaluation questions, including input/output token counts, execution latency, peak GPU VRAM, extraction/truncation rates, and full transition matrices (wrong $\to$ correct, correct $\to$ wrong).
+- `adaptive_sampling_results.json`: Step 5 development grid search results, chosen optimal stopping thresholds ($\tau^*, \gamma^*$), and held-out simulation metrics (accuracy, token cost, mean rollouts, stopping distribution histogram at 4, 8, 16, 32, and fixed-32 recovery analysis).
+- `qualitative_annotations.md`: Markdown tables auditing representative cases of selection disagreement, sequential refinement transitions, and adaptive stopping.
+- `metrics_summary.json`: Consolidated metrics summary across all Task 3 experiments.
+

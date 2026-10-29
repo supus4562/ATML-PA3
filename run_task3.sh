@@ -16,7 +16,9 @@ echo "==========================================================================
 
 # Verify python environment
 PYTHON_BIN="python3"
-if [ -f "venv/bin/python" ]; then
+if [ -f ".atml/bin/python" ]; then
+    PYTHON_BIN=".atml/bin/python"
+elif [ -f "venv/bin/python" ]; then
     PYTHON_BIN="venv/bin/python"
 elif [ -f ".venv/bin/python" ]; then
     PYTHON_BIN=".venv/bin/python"
