@@ -297,11 +297,8 @@ def train_task2(
 
     live_jsonl = os.path.join(ckpt_dir, "training_steps.jsonl")
     live_csv = os.path.join(ckpt_dir, "training_progress.csv")
-    file_mode = "w" if (stage_to_run == "all" or stage_to_run == "stage1" or stage_to_run == ["stage1"]) else "a"
-    f_live_jsonl = open(live_jsonl, file_mode, encoding="utf-8", buffering=1)
-    f_live_csv = open(live_csv, file_mode, encoding="utf-8", buffering=1)
-    if file_mode == "w" or not os.path.exists(live_csv) or os.path.getsize(live_csv) == 0:
-        f_live_csv.write("global_update,stage,stage_update,loss,lr_connector,lr_lora,grad_norm,tokens,sec_per_step\n")
+    s1_weights = os.path.join(ckpt_dir, "stage_1_endpoint_weights.pt")
+    s2_weights = os.path.join(ckpt_dir, "stage_2_endpoint_weights.pt")
 
     collator_normal = DynamicVLMCollator(
         tokenizer=tokenizer,
@@ -324,25 +321,15 @@ def train_task2(
     )
 
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    microbatch_size = config.training.micro_batch_size
+    accum_steps = config.training.gradient_accumulation_steps
+    effective_batch = microbatch_size * accum_steps
 
     training_logs = {
         "step_history": [],
         "dev_eval_history": [],
         "checkpoints": {},
     }
-
-    # Evaluate at Step 0 before training per PA specification
-    print("\n[Evaluation] Running Pre-Training Development Evaluation (Update 0)...")
-    dev_0 = evaluate_development_suite(model, data_splits, collator_normal, collator_noimg, device, im_end_id)
-    training_logs["dev_eval_history"].append({"global_update": 0, "stage": 0, **dev_0})
-    print(f"[Evaluation @ 0] Dev Caption Loss: {dev_0.get('dev_caption_loss', 0.0):.4f} | "
-          f"Grounding delta_NLL: {dev_0.get('grounding_delta_nll', 0.0):.4f} | "
-          f"Natural VQA delta_NLL: {dev_0.get('natural_vqa_delta_nll', 0.0):.4f}")
-
-    global_update = 0
-    microbatch_size = config.training.micro_batch_size
-    accum_steps = config.training.gradient_accumulation_steps
-    effective_batch = microbatch_size * accum_steps
 
     if stage_to_run == "all":
         stages_to_execute = [1, 2, 3]
@@ -355,6 +342,76 @@ def train_task2(
         stages_to_execute = [int(stage_to_run.replace("stage", ""))]
     else:
         stages_to_execute = [1, 2, 3]
+
+    global_update = 0
+
+    # Auto-resume from completed stage endpoint weights
+    if len(stages_to_execute) > 1:
+        if 1 in stages_to_execute and os.path.exists(s1_weights):
+            print(f"\n[Stage 1] Found completed Stage 1 endpoint weights at {s1_weights}!")
+            print(f"[Stage 1] Skipping re-training; loading trained connector weights to resume Stage 2...")
+            payload = torch.load(s1_weights, map_location=device)
+            model.connector.load_state_dict(payload["connector"])
+            global_update = config.training.stage1.updates
+            stages_to_execute = [s for s in stages_to_execute if s != 1]
+
+        if 2 in stages_to_execute and os.path.exists(s2_weights):
+            print(f"\n[Stage 2] Found completed Stage 2 endpoint weights at {s2_weights}!")
+            print(f"[Stage 2] Skipping re-training; loading trained connector & LoRA weights to resume Stage 3...")
+            if not getattr(model, "lora_applied", False):
+                apply_lora_to_vlm(
+                    model,
+                    rank=config.training.stage2.lora_rank,
+                    alpha=config.training.stage2.lora_alpha,
+                    dropout=config.training.stage2.lora_dropout,
+                    target_modules=config.training.stage2.target_modules,
+                )
+                model.lora_applied = True
+            payload = torch.load(s2_weights, map_location=device)
+            model.connector.load_state_dict(payload["connector"])
+            if "lora" in payload:
+                model.language_model.load_state_dict(payload["lora"], strict=False)
+            global_update = config.training.stage1.updates + config.training.stage2.updates
+            stages_to_execute = [s for s in stages_to_execute if s != 2]
+
+    elif stages_to_execute == [2]:
+        if os.path.exists(s1_weights):
+            print(f"\n[Stage 2] Loading Stage 1 connector weights from {s1_weights}...")
+            payload = torch.load(s1_weights, map_location=device)
+            model.connector.load_state_dict(payload["connector"])
+            global_update = config.training.stage1.updates
+    elif stages_to_execute == [3]:
+        if os.path.exists(s2_weights):
+            print(f"\n[Stage 3] Loading Stage 2 connector & LoRA weights from {s2_weights}...")
+            if not getattr(model, "lora_applied", False):
+                apply_lora_to_vlm(
+                    model,
+                    rank=config.training.stage2.lora_rank,
+                    alpha=config.training.stage2.lora_alpha,
+                    dropout=config.training.stage2.lora_dropout,
+                    target_modules=config.training.stage2.target_modules,
+                )
+                model.lora_applied = True
+            payload = torch.load(s2_weights, map_location=device)
+            model.connector.load_state_dict(payload["connector"])
+            if "lora" in payload:
+                model.language_model.load_state_dict(payload["lora"], strict=False)
+            global_update = config.training.stage1.updates + config.training.stage2.updates
+
+    file_mode = "a" if (global_update > 0 or os.path.exists(s1_weights)) else "w"
+    f_live_jsonl = open(live_jsonl, file_mode, encoding="utf-8", buffering=1)
+    f_live_csv = open(live_csv, file_mode, encoding="utf-8", buffering=1)
+    if file_mode == "w" or not os.path.exists(live_csv) or os.path.getsize(live_csv) == 0:
+        f_live_csv.write("global_update,stage,stage_update,loss,lr_connector,lr_lora,grad_norm,tokens,sec_per_step\n")
+
+    if global_update == 0 and 1 in stages_to_execute:
+        # Evaluate at Step 0 before training per PA specification
+        print("\n[Evaluation] Running Pre-Training Development Evaluation (Update 0)...")
+        dev_0 = evaluate_development_suite(model, data_splits, collator_normal, collator_noimg, device, im_end_id)
+        training_logs["dev_eval_history"].append({"global_update": 0, "stage": 0, **dev_0})
+        print(f"[Evaluation @ 0] Dev Caption Loss: {dev_0.get('dev_caption_loss', 0.0):.4f} | "
+              f"Grounding delta_NLL: {dev_0.get('grounding_delta_nll', 0.0):.4f} | "
+              f"Natural VQA delta_NLL: {dev_0.get('natural_vqa_delta_nll', 0.0):.4f}")
 
     for stage_idx in stages_to_execute:
         print("\n" + "=" * 80)
