@@ -322,9 +322,9 @@ def load_task3_dataset(
         s_id = str(row["sample_id"])
         r_id = int(row["rollout_id"])
 
-        text = str(_get_field(row, ["text", "generation", "response", "completion"], ""))
-        token_ids = _safe_int_list(_get_field(row, ["token_ids", "tokens"]))
-        length_val = _get_field(row, ["length", "token_count"])
+        text = str(_get_field(row, ["generated_text", "text", "generation", "response", "completion"], ""))
+        token_ids = _safe_int_list(_get_field(row, ["generated_token_ids", "token_ids", "tokens"]))
+        length_val = _get_field(row, ["n_generated_text_tokens", "length", "token_count"])
         length = int(length_val) if length_val is not None else len(token_ids)
         extracted_ans = str(_get_field(row, ["extracted_answer", "answer", "prediction"], ""))
         gold_ans = str(_get_field(row, ["gold_answer", "ground_truth", "reference", "target"], ""))
@@ -332,9 +332,9 @@ def load_task3_dataset(
         logp_vals = _safe_float_list(_get_field(row, ["logp", "token_logp", "sampled_logp"]))
         kl_vals = _safe_float_list(_get_field(row, ["kl_u_p", "kl", "self_certainty"]))
 
-        a_img_val = _get_field(row, ["Aimage", "a_image", "A_image", "image_attention", "image"])
-        a_prm_val = _get_field(row, ["Aprompt", "a_prompt", "A_prompt", "prompt_attention", "prompt"])
-        a_gen_val = _get_field(row, ["Agenerated", "a_generated", "A_generated", "generated_attention", "generated"])
+        a_img_val = _get_field(row, ["img_attn_total", "Aimage", "a_image", "A_image", "image_attention", "image"])
+        a_prm_val = _get_field(row, ["prompt_text_attn_total", "Aprompt", "a_prompt", "A_prompt", "prompt_attention", "prompt"])
+        a_gen_val = _get_field(row, ["generated_text_attn_total", "Agenerated", "a_generated", "A_generated", "generated_attention", "generated"])
 
         a_img = _safe_float_list(a_img_val) if a_img_val is not None else None
         a_prm = _safe_float_list(a_prm_val) if a_prm_val is not None else None
@@ -346,6 +346,8 @@ def load_task3_dataset(
                 q_meta = json.loads(q_meta)
             except Exception:
                 q_meta = None
+
+        q_text = str(_get_field(row, ["question_text", "question", "problem", "prompt"], ""))
 
         # Precompute normalized answer and correctness
         if dataset_name == "MATH":
@@ -371,7 +373,7 @@ def load_task3_dataset(
             a_generated=a_gen,
             normalized_answer=norm_ans,
             is_correct=correct,
-            question_text=str(row.get("question", "")),
+            question_text=q_text,
             question_metadata=q_meta,
         )
 
