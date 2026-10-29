@@ -30,6 +30,7 @@ env.bak/
 venv.bak/
 
 # Datasets and Large Caches
+data/
 data_cache/
 *.arrow
 *.parquet
