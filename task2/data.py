@@ -785,20 +785,29 @@ class StageCurriculumSampler:
     """
     def __init__(
         self,
-        presence_pool: List[Tuple[VLMExample, VLMExample]],
-        counting_pool: List[Tuple[VLMExample, VLMExample]],
-        caption_pool: List[VLMExample],
+        presence_pool: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        counting_pool: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        caption_pool: Optional[List[VLMExample]] = None,
         natural_vqa_pool: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        presence_pairs: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        counting_pairs: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        captions: Optional[List[VLMExample]] = None,
+        natural_vqa_pairs: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
         stage: int = 2,
         seed: int = 6304,
     ):
         self.stage = stage
         self.rng = random.Random(seed)
 
-        self.presence_pool = list(presence_pool)
-        self.counting_pool = list(counting_pool)
-        self.caption_pool = list(caption_pool)
-        self.natural_vqa_pool = list(natural_vqa_pool) if natural_vqa_pool else []
+        pres = presence_pairs if presence_pairs is not None else presence_pool
+        cnt = counting_pairs if counting_pairs is not None else counting_pool
+        cap = captions if captions is not None else caption_pool
+        vqa = natural_vqa_pairs if natural_vqa_pairs is not None else natural_vqa_pool
+
+        self.presence_pool = list(pres) if pres else []
+        self.counting_pool = list(cnt) if cnt else []
+        self.caption_pool = list(cap) if cap else []
+        self.natural_vqa_pool = list(vqa) if vqa else []
 
         if stage == 2:
             self.choices = ["presence", "counting", "caption"]
@@ -809,7 +818,7 @@ class StageCurriculumSampler:
         else:
             raise ValueError(f"Invalid curriculum mixture stage: {stage}")
 
-    def draw_pair_or_two_examples(self) -> List[VLMExample]:
+    def draw_pair(self) -> List[VLMExample]:
         pick = self.rng.choices(self.choices, weights=self.weights, k=1)[0]
         if pick == "presence":
             pair = self.rng.choice(self.presence_pool)
@@ -824,3 +833,6 @@ class StageCurriculumSampler:
             c1 = self.rng.choice(self.caption_pool)
             c2 = self.rng.choice(self.caption_pool)
             return [c1, c2]
+
+    def draw_pair_or_two_examples(self) -> List[VLMExample]:
+        return self.draw_pair()
