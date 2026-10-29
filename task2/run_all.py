@@ -190,7 +190,8 @@ def main():
 
     training_logs = None
     if run_all or any(s in args.stages for s in ["stage1", "stage2", "stage3"]):
-        stage_target = "all" if run_all else args.stages[0]
+        selected = [s for s in args.stages if s in ["stage1", "stage2", "stage3"]]
+        stage_target = "all" if run_all or not selected else selected
         training_logs = train_task2(
             model=vlm,
             data_splits=data_splits,

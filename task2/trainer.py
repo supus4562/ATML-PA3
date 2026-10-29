@@ -9,6 +9,7 @@ Unified 3-stage curriculum training engine for Task 2:
 - Periodic dev evaluation every 500 updates tracking caption loss, answer NLL, and delta NLL.
 """
 
+import copy
 import json
 import math
 import os
@@ -170,18 +171,73 @@ def evaluate_development_suite(
     """
     model.eval()
 
+    # Helper: chunked evaluation for dev caption loss
+    def _eval_caption_loss(examples: List[VLMExample]) -> float:
+        if not examples:
+            return 0.0
+        batch_size = 16
+        total_weighted_loss = 0.0
+        total_valid = 0
+        for i in range(0, len(examples), batch_size):
+            chunk = examples[i:i + batch_size]
+            b = collator_normal(chunk)
+            vis = b["visual_features"].to(device) if b["visual_features"] is not None else None
+            out = model.forward_multimodal(
+                b["prefix_ids"].to(device),
+                vis,
+                b["suffix_ids"].to(device),
+                b["attention_mask"].to(device),
+            )
+            _, ex_losses, _ = compute_example_weighted_loss(out.logits, b["labels"].to(device))
+            for l_val in ex_losses:
+                total_weighted_loss += float(l_val.item())
+                total_valid += 1
+        return (total_weighted_loss / total_valid) if total_valid > 0 else 0.0
+
+    # Helper: chunked evaluation for reference answer NLL
+    def _eval_nll(examples: List[VLMExample], collator: DynamicVLMCollator) -> float:
+        if not examples:
+            return 0.0
+        batch_size = 16
+        total_weighted_nll = 0.0
+        total_valid = 0
+        for i in range(0, len(examples), batch_size):
+            chunk = examples[i:i + batch_size]
+            b = collator(chunk)
+            vis = b["visual_features"].to(device) if b["visual_features"] is not None else None
+            out = model.forward_multimodal(
+                b["prefix_ids"].to(device),
+                vis,
+                b["suffix_ids"].to(device),
+                b["attention_mask"].to(device),
+            )
+            shift_logits = out.logits[:, :-1, :].contiguous()
+            shift_labels = b["labels"][:, 1:].to(device).contiguous()
+            if im_end_id is not None:
+                shift_labels = shift_labels.clone()
+                shift_labels[shift_labels == im_end_id] = -100
+
+            B, S, V = shift_logits.shape
+            loss_flat = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, V),
+                shift_labels.view(-1),
+                reduction="none",
+                ignore_index=-100,
+            )
+            loss_mat = loss_flat.view(B, S)
+            valid_mask = (shift_labels != -100).float()
+            tokens_per_ex = valid_mask.sum(dim=-1)
+            denom = tokens_per_ex.clamp(min=1.0)
+            ex_nll = (loss_mat * valid_mask).sum(dim=-1) / denom
+            for idx in range(B):
+                if tokens_per_ex[idx] > 0:
+                    total_weighted_nll += float(ex_nll[idx].item())
+                    total_valid += 1
+        return (total_weighted_nll / total_valid) if total_valid > 0 else 0.0
+
     # 1. Dev Captions
     caption_dev = data_splits.get("coco_captions_dev", [])
-    batch = collator_normal(caption_dev)
-    prefix_ids = batch["prefix_ids"].to(device)
-    suffix_ids = batch["suffix_ids"].to(device)
-    attention_mask = batch["attention_mask"].to(device)
-    labels = batch["labels"].to(device)
-    vis_feats = batch["visual_features"].to(device) if batch["visual_features"] is not None else None
-
-    outputs = model.forward_multimodal(prefix_ids, vis_feats, suffix_ids, attention_mask)
-    cap_loss, _, _ = compute_example_weighted_loss(outputs.logits, labels)
-    cap_loss_val = float(cap_loss.item())
+    cap_loss_val = _eval_caption_loss(caption_dev)
 
     # 2. VQA Dev Evaluation on Grounding and Natural VQA
     suites = {
@@ -198,44 +254,20 @@ def evaluate_development_suite(
         all_ex = [p[0] for p in pairs] + [p[1] for p in pairs]
 
         # Condition 1: Correct Image
-        b_corr = collator_normal(all_ex)
-        out_corr = model.forward_multimodal(
-            b_corr["prefix_ids"].to(device),
-            b_corr["visual_features"].to(device) if b_corr["visual_features"] is not None else None,
-            b_corr["suffix_ids"].to(device),
-            b_corr["attention_mask"].to(device),
-        )
-        nll_corr, _ = compute_reference_answer_nll(out_corr.logits, b_corr["labels"].to(device), im_end_id=im_end_id)
+        nll_corr = _eval_nll(all_ex, collator_normal)
 
         # Condition 2: Complementary Swap (swapped images within each pair)
         swapped_ex = []
         for p in pairs:
-            # ex_a conditioned on partner image_b
             swapped_a = copy.copy(p[0])
             swapped_a.image_id = p[0].partner_image_id
-            # ex_b conditioned on partner image_a
             swapped_b = copy.copy(p[1])
             swapped_b.image_id = p[1].partner_image_id
             swapped_ex.extend([swapped_a, swapped_b])
-
-        b_swap = collator_normal(swapped_ex)
-        out_swap = model.forward_multimodal(
-            b_swap["prefix_ids"].to(device),
-            b_swap["visual_features"].to(device) if b_swap["visual_features"] is not None else None,
-            b_swap["suffix_ids"].to(device),
-            b_swap["attention_mask"].to(device),
-        )
-        nll_swap, _ = compute_reference_answer_nll(out_swap.logits, b_swap["labels"].to(device), im_end_id=im_end_id)
+        nll_swap = _eval_nll(swapped_ex, collator_normal)
 
         # Condition 3: No Image
-        b_noimg = collator_noimg(all_ex)
-        out_noimg = model.forward_multimodal(
-            b_noimg["prefix_ids"].to(device),
-            None,
-            b_noimg["suffix_ids"].to(device),
-            b_noimg["attention_mask"].to(device),
-        )
-        nll_noimg, _ = compute_reference_answer_nll(out_noimg.logits, b_noimg["labels"].to(device), im_end_id=im_end_id)
+        nll_noimg = _eval_nll(all_ex, collator_noimg)
 
         delta_nll = nll_swap - nll_corr
 
@@ -307,7 +339,17 @@ def train_task2(
     accum_steps = config.training.gradient_accumulation_steps
     effective_batch = microbatch_size * accum_steps
 
-    stages_to_execute = [1, 2, 3] if stage_to_run == "all" else [int(stage_to_run.replace("stage", ""))]
+    if stage_to_run == "all":
+        stages_to_execute = [1, 2, 3]
+    elif isinstance(stage_to_run, (list, tuple)):
+        stages_to_execute = sorted([int(str(s).replace("stage", "")) for s in stage_to_run if "stage" in str(s) or str(s) in ("1", "2", "3")])
+    elif isinstance(stage_to_run, str) and (" " in stage_to_run or "," in stage_to_run):
+        tokens = stage_to_run.replace(",", " ").split()
+        stages_to_execute = sorted([int(s.replace("stage", "")) for s in tokens if "stage" in s or s in ("1", "2", "3")])
+    elif isinstance(stage_to_run, str) and (stage_to_run.startswith("stage") or stage_to_run in ("1", "2", "3")):
+        stages_to_execute = [int(stage_to_run.replace("stage", ""))]
+    else:
+        stages_to_execute = [1, 2, 3]
 
     for stage_idx in stages_to_execute:
         print("\n" + "=" * 80)
@@ -315,8 +357,8 @@ def train_task2(
         print(stage_names[stage_idx])
         print("=" * 80)
 
-        # In Stage 2, enable LoRA adapters on Qwen
-        if stage_idx == 2:
+        # In Stage 2 or 3, enable LoRA adapters on Qwen if not already applied
+        if stage_idx in (2, 3) and not getattr(model, "lora_applied", False):
             print("[LoRA] Enabling rank-16 LoRA adapters on Qwen attention projections...")
             apply_lora_to_vlm(
                 model,
@@ -325,6 +367,7 @@ def train_task2(
                 dropout=config.training.stage2.lora_dropout,
                 target_modules=config.training.stage2.target_modules,
             )
+            model.lora_applied = True
 
         model.to(device)
         model.train()
