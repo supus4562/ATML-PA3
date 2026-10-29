@@ -18,6 +18,7 @@ class VisionConfig:
     hidden_dim: int = 768
     apply_final_norm: bool = True
     compressed_patches: int = 49  # Optional 2x2 spatial pooling experiment
+    compress_2x2: bool = False
 
 
 @dataclass

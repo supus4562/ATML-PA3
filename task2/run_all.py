@@ -129,7 +129,8 @@ def main():
 
         all_ids = data_splits["all_image_ids"]
         split_map = data_splits["image_split_map"]
-        suffix = "_comp49.pt" if config.vision.compress_2x2 else "_196.pt"
+        compress_flag = bool(getattr(config.vision, "compress_2x2", False))
+        suffix = "_comp49.pt" if compress_flag else "_196.pt"
         missing_count = sum(1 for img_id in all_ids if not os.path.exists(os.path.join(config.data.feature_cache_dir, f"img_{img_id}{suffix}")))
 
         if missing_count > 0:
@@ -146,7 +147,7 @@ def main():
                 extractor=extractor,
                 batch_size=64,
                 max_workers=32,
-                compress=config.vision.compress_2x2,
+                compress=compress_flag,
             )
             extractor.unload()
         else:
