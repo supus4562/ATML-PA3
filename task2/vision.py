@@ -3,9 +3,11 @@ SigLIP Vision Encoder extraction, deterministic image preprocessing,
 feature caching in FP16, and optional 2x2 spatial patch compression (196 -> 49 tokens).
 """
 
+import concurrent.futures
 import os
 import time
-from typing import Dict, List, Optional, Tuple, Union, Any
+import urllib.request
+from typing import Dict, List, Optional, Tuple, Union, Any, Set
 from PIL import Image
 
 import torch
@@ -163,3 +165,121 @@ def cache_image_features(
     elapsed = time.perf_counter() - t_start
     print(f"[Vision Cache] Completed caching {len(cached_paths)} images in {elapsed:.1f}s.")
     return cached_paths
+
+
+def download_coco_image(img_id: int, split: str, temp_dir: str) -> Optional[str]:
+    """Downloads a single real COCO JPEG from official CDN to temp_dir."""
+    dest_path = os.path.join(temp_dir, f"COCO_{split}_{img_id:012d}.jpg")
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 100:
+        return dest_path
+
+    url = f"http://images.cocodataset.org/{split}/COCO_{split}_{img_id:012d}.jpg"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+            with open(dest_path, "wb") as f_out:
+                f_out.write(data)
+            return dest_path
+        except Exception as e:
+            if attempt == 2:
+                print(f"[Vision Download] Warning: Failed to download {url} after 3 attempts: {e}")
+                return None
+            time.sleep(1.0)
+    return None
+
+
+def cache_real_coco_features(
+    image_ids: Set[int],
+    image_split_map: Dict[int, str],
+    cache_dir: str,
+    extractor: SigLIPFeatureExtractor,
+    batch_size: int = 64,
+    max_workers: int = 32,
+    compress: bool = False,
+) -> None:
+    """
+    Downloads missing real MS COCO 2014 JPEGs in parallel and extracts FP16 SigLIP patch features.
+    Saves tensors as `img_{img_id}_196.pt` and removes temporary JPEGs immediately to save disk.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    temp_dir = os.path.join(cache_dir, "temp_jpegs")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    suffix = "_comp49.pt" if compress else "_196.pt"
+
+    missing_ids = [
+        img_id for img_id in sorted(list(image_ids))
+        if not os.path.exists(os.path.join(cache_dir, f"img_{img_id}{suffix}"))
+    ]
+    print(f"[Vision Cache] Total unique images required: {len(image_ids)}. Already cached: {len(image_ids) - len(missing_ids)}. Missing: {len(missing_ids)}.")
+
+    if not missing_ids:
+        print(f"[Vision Cache] All {len(image_ids)} images are already cached in {cache_dir}!")
+        return
+
+    print(f"[Vision Cache] Downloading {len(missing_ids)} missing real COCO images in parallel ({max_workers} threads)...")
+    t_start = time.perf_counter()
+
+    chunk_size = 512
+    for chunk_start in range(0, len(missing_ids), chunk_size):
+        chunk_ids = missing_ids[chunk_start : chunk_start + chunk_size]
+        img_path_map: Dict[int, str] = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_id = {
+                executor.submit(
+                    download_coco_image,
+                    img_id,
+                    image_split_map.get(img_id, "train2014"),
+                    temp_dir,
+                ): img_id
+                for img_id in chunk_ids
+            }
+            for future in concurrent.futures.as_completed(future_to_id):
+                img_id = future_to_id[future]
+                path = future.result()
+                if path and os.path.exists(path):
+                    img_path_map[img_id] = path
+
+        print(f"[Vision Cache] Chunk {chunk_start // chunk_size + 1}/{(len(missing_ids) + chunk_size - 1) // chunk_size}: Downloaded {len(img_path_map)}/{len(chunk_ids)} images. Extracting features on {extractor.device}...")
+
+        batch_ids = list(img_path_map.keys())
+        for b in range(0, len(batch_ids), batch_size):
+            cur_batch_ids = batch_ids[b : b + batch_size]
+            pil_images = []
+            valid_ids = []
+            for b_id in cur_batch_ids:
+                try:
+                    with Image.open(img_path_map[b_id]) as im:
+                        pil_images.append(im.convert("RGB"))
+                    valid_ids.append(b_id)
+                except Exception as e:
+                    print(f"[Vision Cache] Corrupt image {b_id}: {e}")
+
+            if not pil_images:
+                continue
+
+            with torch.no_grad():
+                patch_features = extractor.extract_patch_features(pil_images)  # [B, 196, 768] in FP16
+                if compress:
+                    patch_features = compress_features_2x2(patch_features)
+
+            for idx, b_id in enumerate(valid_ids):
+                feat_tensor = patch_features[idx].cpu()
+                out_p = os.path.join(cache_dir, f"img_{b_id}{suffix}")
+                torch.save(feat_tensor, out_p)
+                if os.path.exists(img_path_map[b_id]):
+                    os.remove(img_path_map[b_id])
+
+    try:
+        os.rmdir(temp_dir)
+    except Exception:
+        pass
+
+    final_cached = len([f for f in os.listdir(cache_dir) if f.endswith(suffix)])
+    t_elapsed = time.perf_counter() - t_start
+    print(f"[Vision Cache] Successfully completed real feature extraction in {t_elapsed:.1f}s! Total cached in {cache_dir}: {final_cached}.")

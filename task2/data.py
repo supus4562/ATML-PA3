@@ -1,8 +1,9 @@
 """
-Data ingestion, preparation, and curriculum sampling for Task 2:
-- COCO 2014 Captions (18k train, 96 dev)
-- Annotation-derived grounding pairs (presence yes/no, counting 1-4)
-- Natural VQAv2 complementary pairs (agreement >= 8/10, differing consensus answers)
+Real Data Ingestion, Extraction, and Curriculum Sampling for Task 2:
+- Real MS COCO 2014 Captions (18,000 train across 6,000 images, 96 dev)
+- Real MS COCO 2014 Annotation-Derived Grounding Pairs (Presence yes/no, Counting 1-4)
+- Real Natural VQAv2 Complementary Pairs (agreement >= 8/10, differing consensus answers)
+- Automatic download of official MS COCO 2014 and VQAv2 annotations
 - Strict image-disjoint split isolation with seed 6304
 - Standard VQA answer normalization
 - Dynamic batch collation with Qwen chat format and token capping
@@ -10,30 +11,20 @@ Data ingestion, preparation, and curriculum sampling for Task 2:
 """
 
 import copy
+import io
 import json
 import os
 import random
 import re
+import urllib.request
+import zipfile
+from collections import Counter
 from typing import Dict, List, Optional, Set, Tuple, Any
 
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer
 
-
-# Standard COCO 80 object categories
-COCO_CATEGORIES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
-    "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
-    "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
-    "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
-    "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-    "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair",
-    "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
-    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
-    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-]
 
 NUMBER_MAP = {
     "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
@@ -53,7 +44,6 @@ def normalize_vqa_answer(answer: str) -> str:
         return ""
     res = answer.lower().strip()
 
-    # Contractions
     contractions = {
         "can't": "cannot",
         "won't": "will not",
@@ -68,16 +58,10 @@ def normalize_vqa_answer(answer: str) -> str:
     for k, v in contractions.items():
         res = res.replace(k, v)
 
-    # Remove punctuation
     res = re.sub(r"[^\w\s]", " ", res)
-
-    # Remove articles
     tokens = res.split()
     tokens = [t for t in tokens if t not in ["a", "an", "the"]]
-
-    # Normalize number words
     tokens = [NUMBER_MAP.get(t, t) for t in tokens]
-
     return " ".join(tokens).strip()
 
 
@@ -89,11 +73,11 @@ class VLMExample:
         image_id: int,
         question: str,
         answer: str,
-        task_type: str,                     # 'caption', 'presence', 'counting', 'natural_vqa'
+        task_type: str,
         pair_id: Optional[str] = None,
         partner_image_id: Optional[int] = None,
         all_human_answers: Optional[List[str]] = None,
-        question_type: Optional[str] = None, # 'yes/no', 'number', 'other'
+        question_type: Optional[str] = None,
     ):
         self.example_id = example_id
         self.image_id = image_id
@@ -120,175 +104,93 @@ class VLMDataset(Dataset):
         return self.examples[idx]
 
 
-def build_programmatic_grounding_pairs(
-    image_ids: List[int],
-    seed: int = 6304,
-    presence_count: int = 500,
-    counting_count: int = 500,
-) -> List[Tuple[VLMExample, VLMExample]]:
-    """
-    Generate annotation-derived template grounding question pairs per PA Section 2:
-    - Presence: 'Does this image contain [object]?' -> Pair image with object ('yes') with non-object ('no').
-    - Counting: 'How many [objects] can you see?' -> Pair images with different annotated counts in [1, 4].
-    """
-    rng = random.Random(seed)
-    pairs: List[Tuple[VLMExample, VLMExample]] = []
-    shuffled_imgs = list(image_ids)
-    rng.shuffle(shuffled_imgs)
+def download_file_streaming(url: str, dest_path: str, chunk_size: int = 2 * 1024 * 1024, max_retries: int = 3):
+    """Downloads a file over HTTP/HTTPS with streaming, progress reporting, and automatic retries."""
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 1024:
+        return
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    temp_dest = dest_path + ".tmp"
 
-    # 1. Presence pairs
-    for i in range(min(presence_count, len(shuffled_imgs) // 2)):
-        img_a = shuffled_imgs[2 * i]
-        img_b = shuffled_imgs[2 * i + 1]
-        category = COCO_CATEGORIES[(seed + i) % len(COCO_CATEGORIES)]
-        question = f"Does this image contain a {category}?"
-        p_id = f"pres_{i}"
-
-        ex_a = VLMExample(
-            example_id=f"{p_id}_a",
-            image_id=img_a,
-            question=question,
-            answer="yes",
-            task_type="presence",
-            pair_id=p_id,
-            partner_image_id=img_b,
-            all_human_answers=["yes"] * 10,
-            question_type="yes/no",
-        )
-        ex_b = VLMExample(
-            example_id=f"{p_id}_b",
-            image_id=img_b,
-            question=question,
-            answer="no",
-            task_type="presence",
-            pair_id=p_id,
-            partner_image_id=img_a,
-            all_human_answers=["no"] * 10,
-            question_type="yes/no",
-        )
-        pairs.append((ex_a, ex_b))
-
-    # 2. Counting pairs
-    offset = len(pairs)
-    for j in range(min(counting_count, (len(shuffled_imgs) - 2 * offset) // 2)):
-        idx = 2 * (offset + j)
-        if idx + 1 >= len(shuffled_imgs):
-            break
-        img_a = shuffled_imgs[idx]
-        img_b = shuffled_imgs[idx + 1]
-        category = COCO_CATEGORIES[(seed + offset + j) % len(COCO_CATEGORIES)]
-        question = f"How many {category}s can you see?"
-        count_a = str(1 + (j % 4))
-        count_b = str(1 + ((j + 1) % 4))
-        p_id = f"count_{j}"
-
-        ex_a = VLMExample(
-            example_id=f"{p_id}_a",
-            image_id=img_a,
-            question=question,
-            answer=count_a,
-            task_type="counting",
-            pair_id=p_id,
-            partner_image_id=img_b,
-            all_human_answers=[count_a] * 10,
-            question_type="number",
-        )
-        ex_b = VLMExample(
-            example_id=f"{p_id}_b",
-            image_id=img_b,
-            question=question,
-            answer=count_b,
-            task_type="counting",
-            pair_id=p_id,
-            partner_image_id=img_a,
-            all_human_answers=[count_b] * 10,
-            question_type="number",
-        )
-        pairs.append((ex_a, ex_b))
-
-    return pairs
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            print(f"[Download] Fetching {url} -> {dest_path} (Attempt {attempt}/{max_retries})...")
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
+                with open(temp_dest, "wb") as f_out:
+                    while True:
+                        chunk = resp.read(chunk_size)
+                        if not chunk:
+                            break
+                        f_out.write(chunk)
+                        downloaded += len(chunk)
+                        if total > 0 and downloaded % (20 * 1024 * 1024) < chunk_size:
+                            print(f"  Downloaded {downloaded / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB ({(downloaded/total)*100:.1f}%)")
+            os.replace(temp_dest, dest_path)
+            print(f"[Download] Successfully completed {os.path.basename(dest_path)} ({os.path.getsize(dest_path)/(1024*1024):.1f} MB).")
+            return
+        except Exception as e:
+            if os.path.exists(temp_dest):
+                os.remove(temp_dest)
+            print(f"[Download] Attempt {attempt} failed for {url}: {e}")
+            if attempt == max_retries:
+                raise RuntimeError(f"Failed to download {url} after {max_retries} attempts: {e}")
+            time.sleep(2.0 * attempt)
 
 
-def build_natural_vqa_pairs(
-    image_ids: List[int],
-    seed: int = 6304,
-    yes_no_count: int = 640,
-    number_count: int = 256,
-    other_count: int = 640,
-) -> List[Tuple[VLMExample, VLMExample]]:
-    """
-    Constructs natural VQAv2 complementary pairs adhering to:
-    - 640 yes/no, 256 number, 640 other for training (or scaled for dev/test).
-    - Normalized consensus answers differ and have agreement from >= 8/10 annotators.
-    """
-    rng = random.Random(seed + 100)
-    pairs: List[Tuple[VLMExample, VLMExample]] = []
-    shuffled_imgs = list(image_ids)
-    rng.shuffle(shuffled_imgs)
+def ensure_real_annotations(cache_dir: str) -> Tuple[str, str]:
+    """Downloads and extracts official MS COCO 2014 and VQAv2 annotations if missing."""
+    os.makedirs(cache_dir, exist_ok=True)
+    coco_dir = os.path.join(cache_dir, "coco_annotations")
+    vqa_dir = os.path.join(cache_dir, "vqa_annotations")
+    os.makedirs(coco_dir, exist_ok=True)
+    os.makedirs(vqa_dir, exist_ok=True)
 
-    img_ptr = 0
-
-    def get_pair_images():
-        nonlocal img_ptr
-        if img_ptr + 1 >= len(shuffled_imgs):
-            img_ptr = 0
-            rng.shuffle(shuffled_imgs)
-        im1, im2 = shuffled_imgs[img_ptr], shuffled_imgs[img_ptr + 1]
-        img_ptr += 2
-        return im1, im2
-
-    # Yes/No pairs
-    yes_no_questions = [
-        "Is the sky clear in this photo?",
-        "Is the animal standing?",
-        "Is there a person visible?",
-        "Is the light red?",
-        "Is the floor wooden?",
-        "Is it daytime?",
+    # 1. COCO 2014 Captions and Instances
+    required_coco = [
+        "captions_train2014.json",
+        "captions_val2014.json",
+        "instances_train2014.json",
+        "instances_val2014.json",
     ]
-    for k in range(yes_no_count):
-        im1, im2 = get_pair_images()
-        q = yes_no_questions[k % len(yes_no_questions)]
-        p_id = f"vqa_yn_{k}"
-        ex1 = VLMExample(f"{p_id}_1", im1, q, "yes", "natural_vqa", p_id, im2, ["yes"] * 9 + ["no"], "yes/no")
-        ex2 = VLMExample(f"{p_id}_2", im2, q, "no", "natural_vqa", p_id, im1, ["no"] * 9 + ["yes"], "yes/no")
-        pairs.append((ex1, ex2))
+    missing_coco = [f for f in required_coco if not os.path.exists(os.path.join(coco_dir, f))]
+    if missing_coco:
+        coco_url = "http://images.cocodataset.org/annotations/annotations_trainval2014.zip"
+        coco_zip = os.path.join(cache_dir, "annotations_trainval2014.zip")
+        download_file_streaming(coco_url, coco_zip)
+        print("[Data Loader] Extracting MS COCO 2014 annotations...")
+        with zipfile.ZipFile(coco_zip, "r") as zf:
+            for member in zf.namelist():
+                base_name = os.path.basename(member)
+                if base_name in required_coco:
+                    with open(os.path.join(coco_dir, base_name), "wb") as f_out:
+                        f_out.write(zf.read(member))
+        if os.path.exists(coco_zip):
+            os.remove(coco_zip)
 
-    # Number pairs
-    number_questions = [
-        "How many people are in the picture?",
-        "How many cars are parked?",
-        "How many cups are on the table?",
-        "How many animals are in the field?",
+    # 2. VQAv2 Annotations & Questions
+    vqa_files = [
+        ("v2_OpenEnded_mscoco_train2014_questions.json", "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip"),
+        ("v2_mscoco_train2014_annotations.json", "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Train_mscoco.zip"),
+        ("v2_OpenEnded_mscoco_val2014_questions.json", "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Val_mscoco.zip"),
+        ("v2_mscoco_val2014_annotations.json", "https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Val_mscoco.zip"),
     ]
-    for k in range(number_count):
-        im1, im2 = get_pair_images()
-        q = number_questions[k % len(number_questions)]
-        c1 = str(1 + (k % 4))
-        c2 = str(1 + ((k + 2) % 4))
-        p_id = f"vqa_num_{k}"
-        ex1 = VLMExample(f"{p_id}_1", im1, q, c1, "natural_vqa", p_id, im2, [c1] * 8 + [c2] * 2, "number")
-        ex2 = VLMExample(f"{p_id}_2", im2, q, c2, "natural_vqa", p_id, im1, [c2] * 8 + [c1] * 2, "number")
-        pairs.append((ex1, ex2))
+    for target_json, url in vqa_files:
+        dest_p = os.path.join(vqa_dir, target_json)
+        if not os.path.exists(dest_p):
+            zip_p = os.path.join(cache_dir, os.path.basename(url))
+            download_file_streaming(url, zip_p)
+            print(f"[Data Loader] Extracting VQAv2 {target_json}...")
+            with zipfile.ZipFile(zip_p, "r") as zf:
+                for member in zf.namelist():
+                    if member.endswith(".json"):
+                        with open(dest_p, "wb") as f_out:
+                            f_out.write(zf.read(member))
+            if os.path.exists(zip_p):
+                os.remove(zip_p)
 
-    # Other pairs
-    other_templates = [
-        ("What color is the vehicle?", ["white", "black", "red", "blue"]),
-        ("What sport is being played?", ["baseball", "tennis", "soccer", "skateboarding"]),
-        ("Where was this photo taken?", ["indoor", "outdoor", "kitchen", "park"]),
-        ("What is the animal eating?", ["grass", "meat", "bamboo", "leaves"]),
-    ]
-    for k in range(other_count):
-        im1, im2 = get_pair_images()
-        q, answers = other_templates[k % len(other_templates)]
-        a1 = answers[k % len(answers)]
-        a2 = answers[(k + 1) % len(answers)]
-        p_id = f"vqa_other_{k}"
-        ex1 = VLMExample(f"{p_id}_1", im1, q, a1, "natural_vqa", p_id, im2, [a1] * 9 + [a2], "other")
-        ex2 = VLMExample(f"{p_id}_2", im2, q, a2, "natural_vqa", p_id, im1, [a2] * 9 + [a1], "other")
-        pairs.append((ex1, ex2))
-
-    return pairs
+    return coco_dir, vqa_dir
 
 
 def prepare_task2_dataset_splits(
@@ -296,82 +198,383 @@ def prepare_task2_dataset_splits(
     seed: int = 6304,
 ) -> Dict[str, Any]:
     """
-    Ingests and partitions the dataset splits ensuring STRICT IMAGE DISJOINTNESS
-    between training (train2014) and evaluation (val2014) per PA Section 2.
+    Ingests official MS COCO 2014 and VQAv2 datasets and partitions into:
+    - COCO Captions (18k train, 96 dev)
+    - Programmatic Grounding (Presence & Counting)
+    - Natural VQAv2 Complementary Pairs (agreement >= 8/10, consensus differing)
+    Ensures STRICT IMAGE DISJOINTNESS between train and eval splits.
     """
     os.makedirs(cache_dir, exist_ok=True)
     manifest_path = os.path.join(cache_dir, "data_manifest_seed6304.json")
 
+    # Download real annotations if missing
+    coco_dir, vqa_dir = ensure_real_annotations(cache_dir)
+
     rng = random.Random(seed)
+    image_split_map: Dict[int, str] = {}
 
-    # Synthetic reproducible image ID pools mimicking train2014 and val2014
-    train_image_pool = list(range(100000, 115000))  # 15,000 train images
-    val_image_pool = list(range(200000, 205000))    # 5,000 val images
+    # =========================================================================
+    # 1. COCO Captions
+    # =========================================================================
+    print("[Data Loader] Processing real MS COCO 2014 Captions...")
+    with open(os.path.join(coco_dir, "captions_train2014.json"), "r", encoding="utf-8") as f:
+        train_cap_data = json.load(f)["annotations"]
+    with open(os.path.join(coco_dir, "captions_val2014.json"), "r", encoding="utf-8") as f:
+        val_cap_data = json.load(f)["annotations"]
 
-    rng.shuffle(train_image_pool)
-    rng.shuffle(val_image_pool)
+    train_cap_map: Dict[int, List[str]] = {}
+    for ann in train_cap_data:
+        train_cap_map.setdefault(ann["image_id"], []).append(ann["caption"].strip())
 
-    # 1. COCO Captions: 6,000 train images x 3 captions = 18,000 examples
-    train_caption_images = train_image_pool[:6000]
-    dev_caption_images = val_image_pool[:96]
+    val_cap_map: Dict[int, List[str]] = {}
+    for ann in val_cap_data:
+        val_cap_map.setdefault(ann["image_id"], []).append(ann["caption"].strip())
+
+    # Filter to images with >= 3 captions
+    eligible_train_cap_imgs = [img_id for img_id, caps in train_cap_map.items() if len(caps) >= 3]
+    rng.shuffle(eligible_train_cap_imgs)
+    selected_train_cap_imgs = eligible_train_cap_imgs[:6000]
 
     coco_captions_train: List[VLMExample] = []
-    for idx, img_id in enumerate(train_caption_images):
-        for cap_idx in range(3):
-            cat = COCO_CATEGORIES[(img_id + cap_idx) % len(COCO_CATEGORIES)]
-            caption = f"A photo showing a {cat} in a natural environment with surrounding details."
+    for img_id in selected_train_cap_imgs:
+        image_split_map[img_id] = "train2014"
+        for cap_idx, c in enumerate(train_cap_map[img_id][:3]):
             coco_captions_train.append(
                 VLMExample(
-                    example_id=f"cap_train_{idx}_{cap_idx}",
+                    example_id=f"cap_train_{img_id}_{cap_idx}",
                     image_id=img_id,
                     question="Describe this image in detail.",
-                    answer=caption,
+                    answer=c,
                     task_type="caption",
                 )
             )
 
+    # 96 images for dev, 1 caption each
+    eligible_val_cap_imgs = list(val_cap_map.keys())
+    rng.shuffle(eligible_val_cap_imgs)
+    selected_dev_cap_imgs = eligible_val_cap_imgs[:96]
+
     coco_captions_dev: List[VLMExample] = []
-    for idx, img_id in enumerate(dev_caption_images):
-        cat = COCO_CATEGORIES[img_id % len(COCO_CATEGORIES)]
+    for img_id in selected_dev_cap_imgs:
+        image_split_map[img_id] = "val2014"
+        c = val_cap_map[img_id][0]
         coco_captions_dev.append(
             VLMExample(
-                example_id=f"cap_dev_{idx}",
+                example_id=f"cap_dev_{img_id}",
                 image_id=img_id,
                 question="Describe this image in detail.",
-                answer=f"A high quality view of a {cat}.",
+                answer=c,
                 task_type="caption",
             )
         )
 
-    # 2. Annotation-Derived Grounding Pairs
-    # Dev: 24 pairs (48 questions); Final Test: 64 pairs (128 questions) from val pool
-    grounding_val_imgs = val_image_pool[96:500]
-    grounding_dev_pairs = build_programmatic_grounding_pairs(grounding_val_imgs[:100], seed=seed, presence_count=12, counting_count=12)
-    grounding_test_pairs = build_programmatic_grounding_pairs(grounding_val_imgs[100:300], seed=seed + 1, presence_count=32, counting_count=32)
+    # =========================================================================
+    # 2. Annotation-Derived Grounding Pairs (Presence & Counting)
+    # =========================================================================
+    print("[Data Loader] Processing real MS COCO 2014 Instances for Grounding Pairs...")
+    with open(os.path.join(coco_dir, "instances_train2014.json"), "r", encoding="utf-8") as f:
+        train_inst_raw = json.load(f)
+    with open(os.path.join(coco_dir, "instances_val2014.json"), "r", encoding="utf-8") as f:
+        val_inst_raw = json.load(f)
 
-    # Training grounding pool from train pool
-    grounding_train_imgs = train_image_pool[6000:12000]
-    grounding_train_presence_pairs = build_programmatic_grounding_pairs(grounding_train_imgs[:3000], seed=seed + 2, presence_count=1500, counting_count=0)
-    grounding_train_counting_pairs = build_programmatic_grounding_pairs(grounding_train_imgs[3000:6000], seed=seed + 3, presence_count=0, counting_count=1500)
+    cat_map = {c["id"]: c["name"] for c in train_inst_raw["categories"]}
+    all_categories = sorted(list(cat_map.values()))
 
-    # 3. Natural VQAv2 Complementary Pairs
-    # Training: 1,536 pairs (640 yes/no, 256 number, 640 other)
-    vqa_train_imgs = train_image_pool[6000:15000]
-    natural_vqa_train_pairs = build_natural_vqa_pairs(vqa_train_imgs, seed=seed, yes_no_count=640, number_count=256, other_count=640)
+    def build_grounding_structures(inst_data, excluded_imgs):
+        img_cat_counts: Dict[int, Dict[str, int]] = {}
+        all_imgs = set()
+        for ann in inst_data["annotations"]:
+            img_id = ann["image_id"]
+            if img_id in excluded_imgs:
+                continue
+            all_imgs.add(img_id)
+            cname = cat_map.get(ann["category_id"])
+            if cname:
+                img_cat_counts.setdefault(img_id, {}).setdefault(cname, 0)
+                img_cat_counts[img_id][cname] += 1
+        return img_cat_counts, sorted(list(all_imgs))
 
-    # Dev: 32 pairs (12 yes/no, 8 number, 12 other)
-    # Test: 96 pairs (36 yes/no, 24 number, 36 other)
-    vqa_val_imgs = val_image_pool[500:2000]
-    natural_vqa_dev_pairs = build_natural_vqa_pairs(vqa_val_imgs[:500], seed=seed + 4, yes_no_count=12, number_count=8, other_count=12)
-    natural_vqa_test_pairs = build_natural_vqa_pairs(vqa_val_imgs[500:1500], seed=seed + 5, yes_no_count=36, number_count=24, other_count=36)
+    val_cat_counts, val_imgs = build_grounding_structures(val_inst_raw, excluded_imgs=set(selected_dev_cap_imgs))
+    train_cat_counts, train_imgs = build_grounding_structures(train_inst_raw, excluded_imgs=set(selected_train_cap_imgs))
 
-    # Verify strict image-disjointness assertions
-    train_ids = set(train_caption_images) | {p[0].image_id for p in grounding_train_presence_pairs} | {p[0].image_id for p in natural_vqa_train_pairs}
-    eval_ids = set(dev_caption_images) | {p[0].image_id for p in grounding_dev_pairs} | {p[0].image_id for p in grounding_test_pairs} | {p[0].image_id for p in natural_vqa_dev_pairs} | {p[0].image_id for p in natural_vqa_test_pairs}
+    def create_grounding_pairs(cat_counts, img_list, presence_target, counting_target, split_name, seed_offset):
+        local_rng = random.Random(seed + seed_offset)
+        # Pre-index by category
+        cat_to_with: Dict[str, List[int]] = {}
+        cat_to_without: Dict[str, List[int]] = {}
+        cat_and_count: Dict[Tuple[str, int], List[int]] = {}
 
-    overlap = train_ids.intersection(eval_ids)
-    assert len(overlap) == 0, f"FATAL: Found {len(overlap)} overlapping images between train and eval splits!"
-    print(f"[Data] Strict Image-Disjointness Verified: {len(train_ids)} train images, {len(eval_ids)} eval images (0 overlap).")
+        for im in img_list:
+            image_split_map[im] = split_name
+            counts = cat_counts.get(im, {})
+            for c in all_categories:
+                cnt = counts.get(c, 0)
+                if cnt > 0:
+                    cat_to_with.setdefault(c, []).append(im)
+                    if cnt in [1, 2, 3, 4]:
+                        cat_and_count.setdefault((c, cnt), []).append(im)
+                else:
+                    cat_to_without.setdefault(c, []).append(im)
+
+        pairs = []
+        # Presence pairs
+        shuffled_cats = list(all_categories)
+        local_rng.shuffle(shuffled_cats)
+        p_idx = 0
+        cat_ptr = 0
+        while len(pairs) < presence_target and cat_ptr < len(shuffled_cats) * 10:
+            c = shuffled_cats[cat_ptr % len(shuffled_cats)]
+            cat_ptr += 1
+            w_list = cat_to_with.get(c, [])
+            wo_list = cat_to_without.get(c, [])
+            if w_list and wo_list:
+                im_a = local_rng.choice(w_list)
+                im_b = local_rng.choice(wo_list)
+                if im_a != im_b:
+                    p_id = f"pres_{split_name}_{p_idx}"
+                    q = f"Does this image contain a {c}?"
+                    ex_a = VLMExample(f"{p_id}_a", im_a, q, "yes", "presence", p_id, im_b, ["yes"] * 10, "yes/no")
+                    ex_b = VLMExample(f"{p_id}_b", im_b, q, "no", "presence", p_id, im_a, ["no"] * 10, "yes/no")
+                    pairs.append((ex_a, ex_b))
+                    p_idx += 1
+
+        # Counting pairs
+        c_idx = 0
+        cat_ptr = 0
+        while len(pairs) < (presence_target + counting_target) and cat_ptr < len(shuffled_cats) * 10:
+            c = shuffled_cats[cat_ptr % len(shuffled_cats)]
+            cat_ptr += 1
+            n1 = local_rng.randint(1, 4)
+            n2 = local_rng.randint(1, 4)
+            if n1 == n2:
+                n2 = 1 if n1 != 1 else 2
+            l1 = cat_and_count.get((c, n1), [])
+            l2 = cat_and_count.get((c, n2), [])
+            if l1 and l2:
+                im_a = local_rng.choice(l1)
+                im_b = local_rng.choice(l2)
+                if im_a != im_b:
+                    p_id = f"count_{split_name}_{c_idx}"
+                    q = f"How many {c}s can you see?"
+                    ex_a = VLMExample(f"{p_id}_a", im_a, q, str(n1), "counting", p_id, im_b, [str(n1)] * 10, "number")
+                    ex_b = VLMExample(f"{p_id}_b", im_b, q, str(n2), "counting", p_id, im_a, [str(n2)] * 10, "number")
+                    pairs.append((ex_a, ex_b))
+                    c_idx += 1
+
+        return pairs
+
+    # Dev: 24 pairs (12 presence, 12 counting); Test: 64 pairs (32 presence, 32 counting)
+    rng.shuffle(val_imgs)
+    val_grounding_dev_pool = val_imgs[: len(val_imgs) // 2]
+    val_grounding_test_pool = val_imgs[len(val_imgs) // 2 :]
+
+    grounding_dev_pairs = create_grounding_pairs(val_cat_counts, val_grounding_dev_pool, 12, 12, "val2014", seed_offset=1)
+    grounding_test_pairs = create_grounding_pairs(val_cat_counts, val_grounding_test_pool, 32, 32, "val2014", seed_offset=2)
+
+    # Train grounding pools
+    grounding_train_presence_pairs = create_grounding_pairs(train_cat_counts, train_imgs, 1500, 0, "train2014", seed_offset=3)
+    grounding_train_counting_pairs = create_grounding_pairs(train_cat_counts, train_imgs, 0, 1500, "train2014", seed_offset=4)
+
+    # =========================================================================
+    # 3. Real Natural VQAv2 Complementary Pairs
+    # =========================================================================
+    print("[Data Loader] Processing real VQAv2 complementary question pairs (agreement >= 8/10)...")
+
+    def extract_real_vqa_pairs(q_json_path, a_json_path, split_name):
+        with open(q_json_path, "r", encoding="utf-8") as f:
+            q_raw = json.load(f)["questions"]
+        with open(a_json_path, "r", encoding="utf-8") as f:
+            a_raw = json.load(f)["annotations"]
+
+        q_dict = {q["question_id"]: q for q in q_raw}
+        norm_q_groups: Dict[str, List[Dict[str, Any]]] = {}
+
+        for a in a_raw:
+            qid = a["question_id"]
+            if qid not in q_dict:
+                continue
+            q_info = q_dict[qid]
+            raw_answers = [ans["answer"] for ans in a["answers"]]
+            norm_answers = [normalize_vqa_answer(ans) for ans in raw_answers]
+            counts = Counter(norm_answers)
+            if not counts:
+                continue
+            consensus, votes = counts.most_common(1)[0]
+            # Strict agreement invariant >= 8/10 per PA Section 2
+            if votes < 8:
+                continue
+
+            # Original consensus answer string
+            canonical_answer = raw_answers[0]
+            for r_a, n_a in zip(raw_answers, norm_answers):
+                if n_a == consensus:
+                    canonical_answer = r_a
+                    break
+
+            raw_q = q_info["question"].strip()
+            norm_q = raw_q.lower().rstrip("?").strip()
+            item = {
+                "question_id": qid,
+                "image_id": q_info["image_id"],
+                "question": raw_q,
+                "canonical_answer": canonical_answer,
+                "all_human_answers": raw_answers,
+                "consensus": consensus,
+                "answer_type": a.get("answer_type", "other"),
+            }
+            norm_q_groups.setdefault(norm_q, []).append(item)
+
+        yn_pairs = []
+        num_pairs = []
+        oth_pairs = []
+
+        for norm_q, items in norm_q_groups.items():
+            if len(items) < 2:
+                continue
+            for i in range(len(items)):
+                for j in range(i + 1, len(items)):
+                    it1, it2 = items[i], items[j]
+                    if it1["image_id"] != it2["image_id"] and it1["consensus"] != it2["consensus"]:
+                        image_split_map[it1["image_id"]] = split_name
+                        image_split_map[it2["image_id"]] = split_name
+                        p_id = f"vqa_{split_name}_{it1['question_id']}_{it2['question_id']}"
+                        atype = it1["answer_type"]
+                        ex1 = VLMExample(
+                            example_id=f"vqa_{it1['question_id']}",
+                            image_id=it1["image_id"],
+                            question=it1["question"],
+                            answer=it1["canonical_answer"],
+                            task_type="natural_vqa",
+                            pair_id=p_id,
+                            partner_image_id=it2["image_id"],
+                            all_human_answers=it1["all_human_answers"],
+                            question_type=atype,
+                        )
+                        ex2 = VLMExample(
+                            example_id=f"vqa_{it2['question_id']}",
+                            image_id=it2["image_id"],
+                            question=it2["question"],
+                            answer=it2["canonical_answer"],
+                            task_type="natural_vqa",
+                            pair_id=p_id,
+                            partner_image_id=it1["image_id"],
+                            all_human_answers=it2["all_human_answers"],
+                            question_type=atype,
+                        )
+                        pair = (ex1, ex2)
+                        if atype == "yes/no":
+                            yn_pairs.append(pair)
+                        elif atype == "number":
+                            num_pairs.append(pair)
+                        else:
+                            oth_pairs.append(pair)
+                        break
+
+        return yn_pairs, num_pairs, oth_pairs
+
+    train_yn, train_num, train_oth = extract_real_vqa_pairs(
+        os.path.join(vqa_dir, "v2_OpenEnded_mscoco_train2014_questions.json"),
+        os.path.join(vqa_dir, "v2_mscoco_train2014_annotations.json"),
+        "train2014",
+    )
+    val_yn, val_num, val_oth = extract_real_vqa_pairs(
+        os.path.join(vqa_dir, "v2_OpenEnded_mscoco_val2014_questions.json"),
+        os.path.join(vqa_dir, "v2_mscoco_val2014_annotations.json"),
+        "val2014",
+    )
+
+    rng.shuffle(train_yn)
+    rng.shuffle(train_num)
+    rng.shuffle(train_oth)
+    rng.shuffle(val_yn)
+    rng.shuffle(val_num)
+    rng.shuffle(val_oth)
+
+    # 1. Train Natural VQAv2 pairs: 640 yes/no, 256 number, 640 other = 1536 pairs
+    natural_vqa_train_pairs = train_yn[:640] + train_num[:256] + train_oth[:640]
+
+    # 2. Strict disjoint partitioning for Val splits (dev vs test vs captions vs grounding)
+    dev_excluded = set(selected_dev_cap_imgs)
+    for p in grounding_dev_pairs:
+        dev_excluded.add(p[0].image_id)
+        dev_excluded.add(p[1].image_id)
+
+    test_excluded = set()
+    for p in grounding_test_pairs:
+        test_excluded.add(p[0].image_id)
+        test_excluded.add(p[1].image_id)
+
+    def select_disjoint_pairs(pool: List[Tuple[VLMExample, VLMExample]], count: int, exclude: Set[int]) -> Tuple[List[Tuple[VLMExample, VLMExample]], Set[int]]:
+        selected = []
+        used = set()
+        for p in pool:
+            im1, im2 = p[0].image_id, p[1].image_id
+            if im1 in exclude or im2 in exclude:
+                continue
+            if im1 in used or im2 in used:
+                continue
+            selected.append(p)
+            used.add(im1)
+            used.add(im2)
+            if len(selected) == count:
+                break
+        return selected, used
+
+    # Dev VQA: 12 yes/no, 8 number, 12 other = 32 pairs
+    dev_yn, dev_used_yn = select_disjoint_pairs(val_yn, 12, dev_excluded | test_excluded)
+    dev_num, dev_used_num = select_disjoint_pairs(val_num, 8, dev_excluded | test_excluded | dev_used_yn)
+    dev_oth, dev_used_oth = select_disjoint_pairs(val_oth, 12, dev_excluded | test_excluded | dev_used_yn | dev_used_num)
+    natural_vqa_dev_pairs = dev_yn + dev_num + dev_oth
+
+    dev_all_vqa_used = dev_used_yn | dev_used_num | dev_used_oth
+
+    # Test VQA: 36 yes/no, 24 number, 36 other = 96 pairs
+    test_yn, test_used_yn = select_disjoint_pairs(val_yn, 36, dev_excluded | test_excluded | dev_all_vqa_used)
+    test_num, test_used_num = select_disjoint_pairs(val_num, 24, dev_excluded | test_excluded | dev_all_vqa_used | test_used_yn)
+    test_oth, test_used_oth = select_disjoint_pairs(val_oth, 36, dev_excluded | test_excluded | dev_all_vqa_used | test_used_yn | test_used_num)
+    natural_vqa_test_pairs = test_yn + test_num + test_oth
+
+    # Verify and collect all image IDs
+    train_ids = set(selected_train_cap_imgs)
+    for p in grounding_train_presence_pairs:
+        train_ids.add(p[0].image_id)
+        train_ids.add(p[1].image_id)
+    for p in grounding_train_counting_pairs:
+        train_ids.add(p[0].image_id)
+        train_ids.add(p[1].image_id)
+    for p in natural_vqa_train_pairs:
+        train_ids.add(p[0].image_id)
+        train_ids.add(p[1].image_id)
+
+    eval_dev_ids = set(selected_dev_cap_imgs)
+    for p in grounding_dev_pairs:
+        eval_dev_ids.add(p[0].image_id)
+        eval_dev_ids.add(p[1].image_id)
+    for p in natural_vqa_dev_pairs:
+        eval_dev_ids.add(p[0].image_id)
+        eval_dev_ids.add(p[1].image_id)
+
+    eval_test_ids = set()
+    for p in grounding_test_pairs:
+        eval_test_ids.add(p[0].image_id)
+        eval_test_ids.add(p[1].image_id)
+    for p in natural_vqa_test_pairs:
+        eval_test_ids.add(p[0].image_id)
+        eval_test_ids.add(p[1].image_id)
+
+    eval_ids = eval_dev_ids | eval_test_ids
+
+    # Enforce strict image disjointness assertions
+    assert len(train_ids.intersection(eval_ids)) == 0, f"FATAL: Found {len(train_ids.intersection(eval_ids))} overlapping images between train and eval!"
+    assert len(eval_dev_ids.intersection(eval_test_ids)) == 0, f"FATAL: Found {len(eval_dev_ids.intersection(eval_test_ids))} overlapping images between dev and test!"
+
+    for im in train_ids:
+        image_split_map[im] = "train2014"
+    for im in eval_ids:
+        image_split_map[im] = "val2014"
+
+    all_image_ids = train_ids | eval_ids
+    print(f"[Data] Strict Image-Disjointness Verified: {len(train_ids)} train images, {len(eval_dev_ids)} dev images, {len(eval_test_ids)} test images (0 overlap). Total unique images: {len(all_image_ids)}.")
 
     # Save manifest
     manifest = {
@@ -384,6 +587,10 @@ def prepare_task2_dataset_splits(
             "natural_vqa_train_pairs": len(natural_vqa_train_pairs),
             "natural_vqa_dev_pairs": len(natural_vqa_dev_pairs),
             "natural_vqa_test_pairs": len(natural_vqa_test_pairs),
+            "train_unique_images": len(train_ids),
+            "dev_unique_images": len(eval_dev_ids),
+            "test_unique_images": len(eval_test_ids),
+            "total_unique_images": len(all_image_ids),
         }
     }
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -399,7 +606,8 @@ def prepare_task2_dataset_splits(
         "natural_vqa_train_pairs": natural_vqa_train_pairs,
         "natural_vqa_dev_pairs": natural_vqa_dev_pairs,
         "natural_vqa_test_pairs": natural_vqa_test_pairs,
-        "manifest": manifest,
+        "all_image_ids": all_image_ids,
+        "image_split_map": image_split_map,
     }
 
 
@@ -436,157 +644,128 @@ class DynamicVLMCollator:
         self.im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
         self.pad_token_id = tokenizer.pad_token_id or 0
 
-        # Pre-tokenize standard user prefix: "<|im_start|>user\n"
         self.prefix_ids = self.tokenizer.encode("<|im_start|>user\n", add_special_tokens=False)
 
     def __call__(self, batch: List[VLMExample]) -> Dict[str, Any]:
         batch_size = len(batch)
         prefix_tensor = torch.tensor([self.prefix_ids] * batch_size, dtype=torch.long)
 
-        # Visual feature retrieval
+        # Real visual feature retrieval
         visual_features_list = []
         for ex in batch:
             if self.no_image:
                 visual_features_list.append(None)
             else:
-                loaded = False
-                if self.feature_cache_dir:
-                    feat_path = os.path.join(self.feature_cache_dir, f"img_{ex.image_id}_196.pt")
-                    if os.path.exists(feat_path):
-                        try:
-                            feat = torch.load(feat_path, map_location="cpu").float()
-                            visual_features_list.append(feat)
-                            loaded = True
-                        except Exception:
-                            pass
-                if not loaded:
-                    # Deterministic pseudo-features for standalone local execution
-                    rng = torch.Generator().manual_seed(ex.image_id)
-                    synth_feat = torch.randn((self.num_patches, self.hidden_dim), generator=rng)
-                    visual_features_list.append(synth_feat)
+                feat_path = os.path.join(self.feature_cache_dir, f"img_{ex.image_id}_196.pt") if self.feature_cache_dir else None
+                if feat_path and os.path.exists(feat_path):
+                    feat = torch.load(feat_path, map_location="cpu").float()
+                    visual_features_list.append(feat)
+                else:
+                    raise FileNotFoundError(f"Missing cached real SigLIP feature for image {ex.image_id} at {feat_path}!")
 
         if not self.no_image:
-            visual_tensor = torch.stack(visual_features_list, dim=0)  # [B, 196, 768]
+            visual_tensor = torch.stack(visual_features_list, dim=0)
         else:
             visual_tensor = None
 
-        # Build suffix tokens and labels
         suffix_id_list = []
         labels_list = []
 
         for ex in batch:
-            # 1. Truncate question and answer according to content token caps
             q_cap = self.question_token_cap
             ans_cap = self.caption_target_cap if ex.task_type == "caption" else self.short_answer_target_cap
 
-            q_toks = self.tokenizer.encode(ex.question, add_special_tokens=False)[:q_cap]
-            a_toks = self.tokenizer.encode(ex.answer, add_special_tokens=False)[:ans_cap]
+            q_tokens = self.tokenizer.encode(f"\n{ex.question}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
+            if len(q_tokens) > q_cap:
+                q_tokens = q_tokens[:q_cap]
 
-            # Suffix structure: "\n{question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>"
-            q_part = self.tokenizer.encode("\n", add_special_tokens=False) + q_toks + [self.im_end_id] + \
-                     self.tokenizer.encode("\n<|im_start|>assistant\n", add_special_tokens=False)
-            a_part = a_toks + [self.im_end_id]
+            ans_tokens = self.tokenizer.encode(f"{ex.answer}<|im_end|>", add_special_tokens=False)
+            if len(ans_tokens) > ans_cap:
+                ans_tokens = ans_tokens[:ans_cap]
 
-            full_suffix = q_part + a_part
+            full_suffix = q_tokens + ans_tokens
             suffix_id_list.append(full_suffix)
 
-            # Labels: -100 for question prompt tokens, actual IDs for answer and <|im_end|>
-            label = [self.ignore_index] * len(q_part) + a_part
-            labels_list.append(label)
+            labels = [self.ignore_index] * len(q_tokens) + ans_tokens
+            labels_list.append(labels)
 
-        # Pad suffix and labels
         max_suffix_len = max(len(s) for s in suffix_id_list)
-        padded_suffixes = []
+        padded_suffix = []
         padded_labels = []
+        attention_mask_list = []
 
-        for s, l in zip(suffix_id_list, labels_list):
-            pad_len = max_suffix_len - len(s)
-            padded_suffixes.append(s + [self.pad_token_id] * pad_len)
-            padded_labels.append(l + [self.ignore_index] * pad_len)
+        for s_ids, l_ids in zip(suffix_id_list, labels_list):
+            pad_len = max_suffix_len - len(s_ids)
+            padded_s = s_ids + [self.pad_token_id] * pad_len
+            padded_l = l_ids + [self.ignore_index] * pad_len
 
-        suffix_tensor = torch.tensor(padded_suffixes, dtype=torch.long)
-        labels_suffix_tensor = torch.tensor(padded_labels, dtype=torch.long)
+            vis_len = 0 if self.no_image else self.num_patches
+            total_active_len = len(self.prefix_ids) + vis_len + len(s_ids)
+            total_pad_len = len(self.prefix_ids) + vis_len + max_suffix_len
+            mask = [1] * total_active_len + [0] * (total_pad_len - total_active_len)
 
-        # Full labels tensor matching multimodal input length:
-        # [Prefix (-100)] + [Visual Tokens (-100)] + [Suffix Labels]
-        prefix_len = len(self.prefix_ids)
-        vis_len = self.num_patches if not self.no_image else 0
+            padded_suffix.append(padded_s)
+            padded_labels.append(padded_l)
+            attention_mask_list.append(mask)
 
-        full_labels = torch.cat([
-            torch.full((batch_size, prefix_len + vis_len), self.ignore_index, dtype=torch.long),
-            labels_suffix_tensor
-        ], dim=1)
-
-        total_seq_len = prefix_len + vis_len + max_suffix_len
-        attention_mask = torch.ones((batch_size, total_seq_len), dtype=torch.long)
-        # Mask padding in suffix
-        for b, s in enumerate(suffix_id_list):
-            pad_len = max_suffix_len - len(s)
-            if pad_len > 0:
-                attention_mask[b, -pad_len:] = 0
+        suffix_tensor = torch.tensor(padded_suffix, dtype=torch.long)
+        labels_tensor = torch.tensor(padded_labels, dtype=torch.long)
+        attention_mask = torch.tensor(attention_mask_list, dtype=torch.long)
 
         return {
             "prefix_ids": prefix_tensor,
             "visual_features": visual_tensor,
             "suffix_ids": suffix_tensor,
+            "labels": labels_tensor,
             "attention_mask": attention_mask,
-            "labels": full_labels,
-            "examples": batch,
         }
 
 
 class StageCurriculumSampler:
     """
-    Curriculum sampler drawing 2 examples per draw according to stage sampling probabilities:
-    - Stage 2: 50% presence, 25% counting, 25% caption replay.
-    - Stage 3: 70% natural VQA, 10% presence, 10% counting, 10% caption replay.
-    Each draw contributes a complete question pair or two caption replay examples.
+    Mixture sampler for Stages 2 and 3 adhering strictly to PA Section 2:
+    - Stage 2: 50% presence pairs, 25% counting pairs, 25% caption replay
+    - Stage 3: 70% natural VQAv2 pairs, 10% presence replay, 10% counting replay, 10% caption replay
+    Each draw contributes two examples (a complete question pair or two caption examples).
     """
     def __init__(
         self,
-        stage: int,
-        captions: List[VLMExample],
-        presence_pairs: List[Tuple[VLMExample, VLMExample]],
-        counting_pairs: List[Tuple[VLMExample, VLMExample]],
-        natural_vqa_pairs: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        presence_pool: List[Tuple[VLMExample, VLMExample]],
+        counting_pool: List[Tuple[VLMExample, VLMExample]],
+        caption_pool: List[VLMExample],
+        natural_vqa_pool: Optional[List[Tuple[VLMExample, VLMExample]]] = None,
+        stage: int = 2,
         seed: int = 6304,
     ):
         self.stage = stage
-        self.captions = captions
-        self.presence_pairs = presence_pairs
-        self.counting_pairs = counting_pairs
-        self.natural_vqa_pairs = natural_vqa_pairs or []
         self.rng = random.Random(seed)
 
-    def draw_pair(self) -> List[VLMExample]:
-        """Draw exactly two examples per step preserving complete question pairs."""
-        r = self.rng.random()
+        self.presence_pool = list(presence_pool)
+        self.counting_pool = list(counting_pool)
+        self.caption_pool = list(caption_pool)
+        self.natural_vqa_pool = list(natural_vqa_pool) if natural_vqa_pool else []
 
-        if self.stage == 2:
-            if r < 0.50 and self.presence_pairs:
-                pair = self.rng.choice(self.presence_pairs)
-                return [pair[0], pair[1]]
-            elif r < 0.75 and self.counting_pairs:
-                pair = self.rng.choice(self.counting_pairs)
-                return [pair[0], pair[1]]
-            else:
-                c1 = self.rng.choice(self.captions)
-                c2 = self.rng.choice(self.captions)
-                return [c1, c2]
+        if stage == 2:
+            self.choices = ["presence", "counting", "caption"]
+            self.weights = [0.50, 0.25, 0.25]
+        elif stage == 3:
+            self.choices = ["natural_vqa", "presence", "counting", "caption"]
+            self.weights = [0.70, 0.10, 0.10, 0.10]
+        else:
+            raise ValueError(f"Invalid curriculum mixture stage: {stage}")
 
-        elif self.stage == 3:
-            if r < 0.70 and self.natural_vqa_pairs:
-                pair = self.rng.choice(self.natural_vqa_pairs)
-                return [pair[0], pair[1]]
-            elif r < 0.80 and self.presence_pairs:
-                pair = self.rng.choice(self.presence_pairs)
-                return [pair[0], pair[1]]
-            elif r < 0.90 and self.counting_pairs:
-                pair = self.rng.choice(self.counting_pairs)
-                return [pair[0], pair[1]]
-            else:
-                c1 = self.rng.choice(self.captions)
-                c2 = self.rng.choice(self.captions)
-                return [c1, c2]
-
-        return [self.rng.choice(self.captions), self.rng.choice(self.captions)]
+    def draw_pair_or_two_examples(self) -> List[VLMExample]:
+        pick = self.rng.choices(self.choices, weights=self.weights, k=1)[0]
+        if pick == "presence":
+            pair = self.rng.choice(self.presence_pool)
+            return [pair[0], pair[1]]
+        elif pick == "counting":
+            pair = self.rng.choice(self.counting_pool)
+            return [pair[0], pair[1]]
+        elif pick == "natural_vqa":
+            pair = self.rng.choice(self.natural_vqa_pool)
+            return [pair[0], pair[1]]
+        else:
+            c1 = self.rng.choice(self.caption_pool)
+            c2 = self.rng.choice(self.caption_pool)
+            return [c1, c2]
