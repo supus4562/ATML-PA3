@@ -172,6 +172,7 @@ def evaluate_question_budget(
 
     gold_ans = rollouts[0].gold_answer
     q_meta = rollouts[0].question_metadata
+    ans_corr_cache: Dict[str, bool] = {c.normalized_answer: c.is_correct for c in rollouts}
 
     for perm in permutations:
         prefix_indices = perm[:budget]
@@ -194,7 +195,12 @@ def evaluate_question_budget(
                 precomputed_metrics=metrics_dict,
             )
 
-            is_corr = check_answer_correctness(sel_ans, gold_ans, dataset_name, q_meta)
+            if sel_ans in ans_corr_cache:
+                is_corr = ans_corr_cache[sel_ans]
+            else:
+                is_corr = check_answer_correctness(sel_ans, gold_ans, dataset_name, q_meta)
+                ans_corr_cache[sel_ans] = is_corr
+
             cost = candidates[0].length if rule == "first_ans" else total_tokens_consumed
 
             res = rule_results[rule]

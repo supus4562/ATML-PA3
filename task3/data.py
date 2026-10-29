@@ -7,10 +7,17 @@ import os
 import re
 import json
 import math
+import io
+import contextlib
+import logging
+import functools
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any, Set
 import numpy as np
 import pandas as pd
+
+# Suppress verbose SymPy timeout warnings from math_verify
+logging.getLogger("math_verify").setLevel(logging.ERROR)
 
 try:
     from math_verify import parse, verify
@@ -170,6 +177,47 @@ def normalize_mathvista_answer(
     return s if s else "NO_ANSWER"
 
 
+@functools.lru_cache(maxsize=100000)
+def _grade_math_fast_cached(predicted: str, gold: str) -> bool:
+    """Cached fast-path and symbolic grader for MATH answers."""
+    if not predicted or predicted == "NO_ANSWER" or not gold or gold == "NO_ANSWER":
+        return False
+
+    norm_pred = normalize_math_answer(predicted)
+    norm_gold = normalize_math_answer(gold)
+
+    if norm_pred == "NO_ANSWER" or norm_gold == "NO_ANSWER":
+        return False
+    if norm_pred == norm_gold:
+        return True
+
+    # Numeric float equivalence
+    try:
+        if abs(float(norm_pred) - float(norm_gold)) < 1e-6:
+            return True
+    except ValueError:
+        pass
+
+    # Symbolic equivalence via math_verify (only if fast-paths do not match and strings are concise)
+    if HAS_MATH_VERIFY and len(predicted) < 150 and len(gold) < 150:
+        try:
+            g_str = str(gold).strip()
+            p_str = str(predicted).strip()
+            g_parsed = parse(f"${g_str}$" if "$" not in g_str else g_str)
+            p_parsed = parse(f"${p_str}$" if "$" not in p_str else p_str)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    res = verify(g_parsed, p_parsed, timeout_seconds=1)
+                except TypeError:
+                    res = verify(g_parsed, p_parsed)
+                if res:
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def check_answer_correctness(
     predicted: str,
     gold: str,
@@ -184,28 +232,7 @@ def check_answer_correctness(
         return False
 
     if dataset == "MATH":
-        if HAS_MATH_VERIFY:
-            try:
-                g_str = str(gold).strip()
-                p_str = str(predicted).strip()
-                g_parsed = parse(f"${g_str}$" if "$" not in g_str else g_str)
-                p_parsed = parse(f"${p_str}$" if "$" not in p_str else p_str)
-                if verify(g_parsed, p_parsed):
-                    return True
-            except Exception:
-                pass
-
-        norm_pred = normalize_math_answer(predicted)
-        norm_gold = normalize_math_answer(gold)
-        if norm_pred == "NO_ANSWER" or norm_gold == "NO_ANSWER":
-            return False
-        if norm_pred == norm_gold:
-            return True
-        # Try float comparison if both are numerical
-        try:
-            return abs(float(norm_pred) - float(norm_gold)) < 1e-6
-        except ValueError:
-            return False
+        return _grade_math_fast_cached(str(predicted).strip(), str(gold).strip())
     else:
         norm_pred = normalize_mathvista_answer(predicted, metadata)
         norm_gold = normalize_mathvista_answer(gold, metadata)

@@ -132,6 +132,7 @@ def simulate_adaptive_sampling_policy(
     for s_id, rollouts in question_rollouts.items():
         gold_ans = rollouts[0].gold_answer
         q_meta = rollouts[0].question_metadata
+        ans_corr_cache: Dict[str, bool] = {c.normalized_answer: c.is_correct for c in rollouts}
 
         for perm in permutations:
             stopped = False
@@ -160,7 +161,11 @@ def simulate_adaptive_sampling_policy(
                 stopped_n = 32
 
             cost = sum(rollouts[i].length for i in perm[:stopped_n])
-            is_corr = check_answer_correctness(chosen_ans, gold_ans, dataset_name, q_meta)
+            if chosen_ans in ans_corr_cache:
+                is_corr = ans_corr_cache[chosen_ans]
+            else:
+                is_corr = check_answer_correctness(chosen_ans, gold_ans, dataset_name, q_meta)
+                ans_corr_cache[chosen_ans] = is_corr
 
             total_correct += 1.0 if is_corr else 0.0
             total_tokens += cost
@@ -172,7 +177,11 @@ def simulate_adaptive_sampling_policy(
                 incorrect_early_stops += 1
                 # Check if fixed-32 would have gotten it right
                 fixed32_ans, _, _ = select_answer([rollouts[i] for i in perm[:32]], "self_consistency", dataset_name)
-                if check_answer_correctness(fixed32_ans, gold_ans, dataset_name, q_meta):
+                f32_corr = ans_corr_cache.get(fixed32_ans, None)
+                if f32_corr is None:
+                    f32_corr = check_answer_correctness(fixed32_ans, gold_ans, dataset_name, q_meta)
+                    ans_corr_cache[fixed32_ans] = f32_corr
+                if f32_corr:
                     recoverable_by_fixed32 += 1
 
     total_evals = num_questions * num_perms
