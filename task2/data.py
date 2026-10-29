@@ -697,9 +697,11 @@ class DynamicVLMCollator:
         for s_ids, l_ids in zip(suffix_id_list, labels_list):
             pad_len = max_suffix_len - len(s_ids)
             padded_s = s_ids + [self.pad_token_id] * pad_len
-            padded_l = l_ids + [self.ignore_index] * pad_len
 
             vis_len = 0 if self.no_image else self.num_patches
+            prefix_vis_labels = [self.ignore_index] * (len(self.prefix_ids) + vis_len)
+            padded_l = prefix_vis_labels + l_ids + [self.ignore_index] * pad_len
+
             total_active_len = len(self.prefix_ids) + vis_len + len(s_ids)
             total_pad_len = len(self.prefix_ids) + vis_len + max_suffix_len
             mask = [1] * total_active_len + [0] * (total_pad_len - total_active_len)
