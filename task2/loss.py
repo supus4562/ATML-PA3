@@ -38,19 +38,15 @@ def compute_example_weighted_loss(
     )
     loss_matrix = loss_flat.view(B, S)
 
-    valid_mask = (shift_labels != ignore_index).float()
-    tokens_per_example = valid_mask.sum(dim=-1)  # [B]
-
-    # Guard against examples with 0 valid tokens
+    tokens_per_example = (shift_labels != ignore_index).sum(dim=-1).float()  # [B]
     denom = tokens_per_example.clamp(min=1.0)
-    example_losses = (loss_matrix * valid_mask).sum(dim=-1) / denom  # [B]
+    example_losses = loss_matrix.sum(dim=-1) / denom  # [B]
 
-    # Only average over examples that have at least one supervised token
-    has_tokens = (tokens_per_example > 0).float()
+    has_tokens = (tokens_per_example > 0.0).float()
     batch_denom = has_tokens.sum().clamp(min=1.0)
     mean_loss = (example_losses * has_tokens).sum() / batch_denom
 
-    total_valid_tokens = int(valid_mask.sum().item())
+    total_valid_tokens = int(tokens_per_example.sum().item())
     return mean_loss, example_losses, total_valid_tokens
 
 
@@ -70,8 +66,9 @@ def compute_reference_answer_nll(
     # Mask out termination token if provided
     if im_end_id is not None:
         term_mask = (shift_labels == im_end_id)
-        shift_labels = shift_labels.clone()
-        shift_labels[term_mask] = ignore_index
+        if term_mask.any():
+            shift_labels = shift_labels.clone()
+            shift_labels[term_mask] = ignore_index
 
     B, S, V = shift_logits.shape
     loss_flat = F.cross_entropy(
@@ -82,14 +79,13 @@ def compute_reference_answer_nll(
     )
     loss_matrix = loss_flat.view(B, S)
 
-    valid_mask = (shift_labels != ignore_index).float()
-    tokens_per_example = valid_mask.sum(dim=-1)
+    tokens_per_example = (shift_labels != ignore_index).sum(dim=-1).float()
     denom = tokens_per_example.clamp(min=1.0)
+    example_nll = loss_matrix.sum(dim=-1) / denom
 
-    example_nll = (loss_matrix * valid_mask).sum(dim=-1) / denom
-    has_tokens = (tokens_per_example > 0).float()
+    has_tokens = (tokens_per_example > 0.0).float()
     batch_denom = has_tokens.sum().clamp(min=1.0)
 
     mean_nll = float(((example_nll * has_tokens).sum() / batch_denom).item())
-    total_tokens = int(valid_mask.sum().item())
+    total_tokens = int(tokens_per_example.sum().item())
     return mean_nll, total_tokens

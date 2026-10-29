@@ -297,6 +297,11 @@ def train_task2(
 
     live_jsonl = os.path.join(ckpt_dir, "training_steps.jsonl")
     live_csv = os.path.join(ckpt_dir, "training_progress.csv")
+    file_mode = "w" if (stage_to_run == "all" or stage_to_run == "stage1" or stage_to_run == ["stage1"]) else "a"
+    f_live_jsonl = open(live_jsonl, file_mode, encoding="utf-8", buffering=1)
+    f_live_csv = open(live_csv, file_mode, encoding="utf-8", buffering=1)
+    if file_mode == "w" or not os.path.exists(live_csv) or os.path.getsize(live_csv) == 0:
+        f_live_csv.write("global_update,stage,stage_update,loss,lr_connector,lr_lora,grad_norm,tokens,sec_per_step\n")
 
     collator_normal = DynamicVLMCollator(
         tokenizer=tokenizer,
@@ -436,11 +441,11 @@ def train_task2(
                         batch_ex.extend(sampler.draw_pair())
 
                 batch = collator_normal(batch_ex)
-                prefix_ids = batch["prefix_ids"].to(device)
-                vis_feats = batch["visual_features"].to(device) if batch["visual_features"] is not None else None
-                suffix_ids = batch["suffix_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                labels = batch["labels"].to(device)
+                prefix_ids = batch["prefix_ids"].to(device, non_blocking=True)
+                vis_feats = batch["visual_features"].to(device, non_blocking=True) if batch["visual_features"] is not None else None
+                suffix_ids = batch["suffix_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+                labels = batch["labels"].to(device, non_blocking=True)
 
                 with torch.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=(config.training.fp16 and device.type == "cuda")):
                     outputs = model.forward_multimodal(prefix_ids, vis_feats, suffix_ids, attention_mask)
@@ -493,16 +498,10 @@ def train_task2(
             pbar.update(1)
             sys.stdout.flush()
 
-            # Live redundant persistence
+            # Live persistence without blocking fsync
             try:
-                with open(live_jsonl, "a", encoding="utf-8") as f_j:
-                    f_j.write(json.dumps(step_record) + "\n")
-                    f_j.flush()
-                    os.fsync(f_j.fileno())
-                with open(live_csv, "a", encoding="utf-8") as f_c:
-                    f_c.write(f"{global_update},{stage_idx},{stage_update},{step_loss:.6f},{lrs[0]:.6e},{step_record['lr_lora']:.6e},{step_record['grad_norm']:.4f},{accum_tokens},{sec_per_step:.4f}\n")
-                    f_c.flush()
-                    os.fsync(f_c.fileno())
+                f_live_jsonl.write(json.dumps(step_record) + "\n")
+                f_live_csv.write(f"{global_update},{stage_idx},{stage_update},{step_loss:.6f},{lrs[0]:.6e},{step_record['lr_lora']:.6e},{step_record['grad_norm']:.4f},{accum_tokens},{sec_per_step:.4f}\n")
             except Exception:
                 pass
 
@@ -551,6 +550,12 @@ def train_task2(
             stage_payload["lora"] = {k: v for k, v in model.language_model.named_parameters() if "lora_" in k}
         torch.save(stage_payload, stage_weights_path)
         print(f"[Stage {stage_idx}] Saved endpoint weights to {stage_weights_path}")
+
+    try:
+        f_live_jsonl.close()
+        f_live_csv.close()
+    except Exception:
+        pass
 
     # Summary save
     summary_path = os.path.join(ckpt_dir, "task2_training_summary.json")

@@ -385,7 +385,7 @@ def list_volume_artifacts(include_checkpoints: bool = False) -> list:
                     or f.endswith(".safetensors")
                     or f.endswith(".npy")
                     or f.endswith(".arrow")
-                    or "checkpoints" in rel_p
+                    or ("checkpoints" in rel_p and not (f.endswith(".csv") or f.endswith(".json") or f.endswith(".jsonl") or f.endswith(".md")))
                     or "data_cache" in rel_p
                 ):
                     continue
@@ -412,7 +412,7 @@ def fetch_volume_file(rel_path: str) -> bytes:
 def main(
     task: str = "task2",
     stage: str = "all",
-    gpu: str = "A100",
+    gpu: str = "H100",
     config: str = "",
     skip_eval: bool = False,
     dry_run: bool = False,
@@ -427,7 +427,7 @@ def main(
       --stage: Stage to run:
                For task1: [all, baseline, train_full_ft, train_l2sp, train_lora4, train_lora16, train_oplora, diagnostics, qualitative, synthesize]
                For task2: [all, prepare_data, cache_features, stage1, stage2, stage3, evaluate, synthesize]
-      --gpu: Hardware accelerator [A100, RTX-PRO-6000, H100, A10G, L4] (Default: A100, strictly 1 GPU)
+      --gpu: Hardware accelerator [H100, A100, RTX-PRO-6000, A10G, L4] (Default: H100, strictly 1 GPU)
       --config: Path to configuration YAML (Defaults to modal_task2_config.yaml or modal_config.yaml)
       --skip-eval: Skip evaluation (Task 1 debug flag)
       --dry-run: Fast container & volume test without running training

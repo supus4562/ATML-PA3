@@ -21,7 +21,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from task2.config import Task2Config
 from task2.vision import SigLIPFeatureExtractor, cache_image_features, cache_real_coco_features
 from task2.models import VisualConnector, VLMModel, calibrate_connector_scale
-from task2.data import prepare_task2_dataset_splits
+from task2.data import prepare_task2_dataset_splits, preload_features_into_ram
 from task2.trainer import train_task2
 from task2.evaluator import evaluate_test_suite_4_conditions
 
@@ -98,6 +98,7 @@ def main():
             torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
 
     os.makedirs(config.paths.output_dir, exist_ok=True)
     os.makedirs(config.paths.checkpoint_dir, exist_ok=True)
@@ -154,6 +155,14 @@ def main():
             print(f"[Vision Cache] All {len(all_ids)} required image features are already cached!")
 
         trigger_modal_stage_commit("vision_cache")
+
+        # Preload all cached FP16 features directly into CPU RAM to eliminate disk I/O during training
+        preload_features_into_ram(
+            image_ids=all_ids,
+            feature_cache_dir=config.data.feature_cache_dir,
+            max_workers=32,
+            compress=compress_flag,
+        )
 
     # 3. Load Qwen and Visual Connector
     print("\n" + "=" * 80)
@@ -267,7 +276,7 @@ def main():
 
         ckpt_csv = os.path.join(config.paths.checkpoint_dir, "training_progress.csv")
         out_csv = os.path.join(config.paths.output_dir, "training_progress.csv")
-        if os.path.exists(ckpt_csv) and not os.path.exists(out_csv):
+        if os.path.exists(ckpt_csv):
             import shutil
             shutil.copy2(ckpt_csv, out_csv)
 

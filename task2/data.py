@@ -10,12 +10,14 @@ Real Data Ingestion, Extraction, and Curriculum Sampling for Task 2:
 - Stage curriculum samplers (Stage 1, Stage 2, Stage 3).
 """
 
+import concurrent.futures
 import copy
 import io
 import json
 import os
 import random
 import re
+import time
 import urllib.request
 import zipfile
 from collections import Counter
@@ -611,12 +613,50 @@ def prepare_task2_dataset_splits(
     }
 
 
+_FEATURE_RAM_CACHE: Dict[Tuple[int, bool], torch.Tensor] = {}
+_TOKEN_CACHE: Dict[Tuple[str, str, str], Tuple[List[int], List[int]]] = {}
+
+
+def preload_features_into_ram(
+    image_ids: Set[int],
+    feature_cache_dir: str,
+    max_workers: int = 32,
+    compress: bool = False,
+) -> None:
+    """Preloads all cached FP16 SigLIP feature tensors into CPU RAM to eliminate disk I/O during training."""
+    suffix = "_comp49.pt" if compress else "_196.pt"
+    to_load = [img_id for img_id in sorted(list(image_ids)) if (img_id, compress) not in _FEATURE_RAM_CACHE]
+    if not to_load:
+        print(f"[RAM Cache] All {len(image_ids)} image features already in RAM.")
+        return
+
+    print(f"[RAM Cache] Preloading {len(to_load)} feature tensors directly into CPU RAM ({max_workers} threads)...")
+    t0 = time.perf_counter()
+
+    def _load_single(img_id: int):
+        p = os.path.join(feature_cache_dir, f"img_{img_id}{suffix}")
+        if os.path.exists(p):
+            feat = torch.load(p, map_location="cpu").float()
+            return img_id, feat
+        return img_id, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for img_id, feat in executor.map(_load_single, to_load):
+            if feat is not None:
+                _FEATURE_RAM_CACHE[(img_id, compress)] = feat
+
+    elapsed = time.perf_counter() - t0
+    ram_mb = sum(t.element_size() * t.nelement() for t in _FEATURE_RAM_CACHE.values()) / (1024 * 1024)
+    print(f"[RAM Cache] Successfully cached {len(_FEATURE_RAM_CACHE)} tensors ({ram_mb:.1f} MB) in RAM in {elapsed:.2f}s!")
+
+
 class DynamicVLMCollator:
     """
     Collates VLM examples into multimodal tensors matching Qwen's chat template:
     User prefix: <|im_start|>user\n
     [Visual tokens Z(I) inserted here]
     User suffix: \n{question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>
+    Utilizes in-memory RAM caches for features and tokenized text to maximize throughput.
     """
     def __init__(
         self,
@@ -650,18 +690,25 @@ class DynamicVLMCollator:
         batch_size = len(batch)
         prefix_tensor = torch.tensor([self.prefix_ids] * batch_size, dtype=torch.long)
 
-        # Real visual feature retrieval
+        # Real visual feature retrieval from in-RAM cache or disk
         visual_features_list = []
+        compress_flag = (self.num_patches == 49)
         for ex in batch:
             if self.no_image:
                 visual_features_list.append(None)
             else:
-                feat_path = os.path.join(self.feature_cache_dir, f"img_{ex.image_id}_196.pt") if self.feature_cache_dir else None
-                if feat_path and os.path.exists(feat_path):
-                    feat = torch.load(feat_path, map_location="cpu").float()
-                    visual_features_list.append(feat)
+                key = (ex.image_id, compress_flag)
+                if key in _FEATURE_RAM_CACHE:
+                    feat = _FEATURE_RAM_CACHE[key]
                 else:
-                    raise FileNotFoundError(f"Missing cached real SigLIP feature for image {ex.image_id} at {feat_path}!")
+                    suffix = "_comp49.pt" if compress_flag else "_196.pt"
+                    feat_path = os.path.join(self.feature_cache_dir, f"img_{ex.image_id}{suffix}") if self.feature_cache_dir else None
+                    if feat_path and os.path.exists(feat_path):
+                        feat = torch.load(feat_path, map_location="cpu").float()
+                        _FEATURE_RAM_CACHE[key] = feat
+                    else:
+                        raise FileNotFoundError(f"Missing cached real SigLIP feature for image {ex.image_id} at {feat_path}!")
+                visual_features_list.append(feat)
 
         if not self.no_image:
             visual_tensor = torch.stack(visual_features_list, dim=0)
@@ -672,16 +719,22 @@ class DynamicVLMCollator:
         labels_list = []
 
         for ex in batch:
-            q_cap = self.question_token_cap
-            ans_cap = self.caption_target_cap if ex.task_type == "caption" else self.short_answer_target_cap
+            cache_key = (ex.question, ex.answer, ex.task_type)
+            if cache_key in _TOKEN_CACHE:
+                q_tokens, ans_tokens = _TOKEN_CACHE[cache_key]
+            else:
+                q_cap = self.question_token_cap
+                ans_cap = self.caption_target_cap if ex.task_type == "caption" else self.short_answer_target_cap
 
-            q_tokens = self.tokenizer.encode(f"\n{ex.question}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
-            if len(q_tokens) > q_cap:
-                q_tokens = q_tokens[:q_cap]
+                q_tokens = self.tokenizer.encode(f"\n{ex.question}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
+                if len(q_tokens) > q_cap:
+                    q_tokens = q_tokens[:q_cap]
 
-            ans_tokens = self.tokenizer.encode(f"{ex.answer}<|im_end|>", add_special_tokens=False)
-            if len(ans_tokens) > ans_cap:
-                ans_tokens = ans_tokens[:ans_cap]
+                ans_tokens = self.tokenizer.encode(f"{ex.answer}<|im_end|>", add_special_tokens=False)
+                if len(ans_tokens) > ans_cap:
+                    ans_tokens = ans_tokens[:ans_cap]
+
+                _TOKEN_CACHE[cache_key] = (q_tokens, ans_tokens)
 
             full_suffix = q_tokens + ans_tokens
             suffix_id_list.append(full_suffix)
