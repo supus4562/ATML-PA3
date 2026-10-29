@@ -1,0 +1,17 @@
+{
+  "condition": "baseline",
+  "scores": {
+    "gsm8k": 24.260803639120546,
+    "hellaswag": 47.32125074686317,
+    "hellaswag_raw": 37.572196773551084,
+    "boolq": 64.52599388379205,
+    "arc_easy": 56.060606060606055,
+    "arc_easy_raw": 60.77441077441077
+  },
+  "metadata": {
+    "gsm8k": {
+      "unextractable": 0,
+      "truncated": 1326
+    }
+  }
+}

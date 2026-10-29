@@ -1,0 +1,156 @@
+# ATML PA3 - Task 1 Configuration for Modal Cloud GPU (NVIDIA A10G / A100)
+# Preserves all assignment invariants while optimizing performance for 24GB+ VRAM.
+
+# Model & Reproducibility
+model:
+  model_name_or_path: "Qwen/Qwen3-0.6B"
+  enable_thinking: false
+  attn_implementation: "sdpa"
+  seed: 6304
+
+# Dataset Settings
+data:
+  dataset_name: "meta-math/MetaMathQA"
+  max_examples: 40000
+  max_seq_length: 2048
+  filter_gsm8k_leakage: true
+  cache_dir: "/root/volume/data_cache/task1"
+
+# Shared Training Settings
+training:
+  num_epochs: 1
+  micro_batch_size: 2
+  gradient_accumulation_steps: 16  # Effective batch size = 32
+  total_updates: 1250              # 40,000 / 32
+  warmup_updates: 38
+  learning_rate_schedule: "cosine"
+  optimizer:
+    name: "AdamW"
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+    weight_decay: 0.01
+    fused: true                    # Fully supported on Modal CUDA environment
+  gradient_clipping: 1.0
+  gradient_checkpointing: false    # Disabled for 4-5 it/s speed on 48GB/96GB RTX 6000 (VRAM >> 4GB needed)
+  use_cache: true
+  fp16: true
+  checkpoint_updates: [312, 625, 937, 1250]
+  evaluation_updates:
+    full_ft: [625, 1250]
+    full_ft_l2sp: [1250]
+    lora_4: [1250]
+    lora_16: [1250]
+    oplora_16: [1250]
+
+# Specific Method Variants
+methods:
+  full_ft:
+    peak_lr: 2.0e-5
+    lambda_l2sp: 0.0
+
+  full_ft_l2sp:
+    peak_lr: 2.0e-5
+    lambda_l2sp: 1.0e-3
+
+  lora_4:
+    peak_lr: 2.0e-4
+    rank: 4
+    alpha: 8
+    dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  lora_16:
+    peak_lr: 2.0e-4
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+  oplora_16:
+    peak_lr: 2.0e-4
+    rank: 16
+    alpha: 32
+    protection_rank_k: 128
+    dropout: 0.05
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+# Diagnostics Settings
+diagnostics:
+  target_layers: [0, 13, 27]
+  target_module: "down_proj"
+  protection_rank_k: 128
+  num_probe_gsm8k: 32
+  num_probe_hellaswag: 32
+  seed: 6304
+
+# Qualitative Generation Settings
+qualitative:
+  prompts_file: "task1/first_plot_questions.yaml"
+  max_new_tokens: 512
+  temperature: 0.0
+  conditions:
+    - "baseline"
+    - "full_ft_midpoint"
+    - "full_ft_final"
+    - "full_ft_l2sp_final"
+    - "lora_4_final"
+    - "lora_16_final"
+    - "oplora_16_final"
+
+# Benchmark Evaluation Settings
+evaluation:
+  benchmarks:
+    - name: "gsm8k"
+      split: "test"
+      num_samples: 1319
+      task: "gsm8k_cot"
+      metric: "exact_match"
+      max_new_tokens: 1024
+      chat_template: true
+      enable_thinking: false
+      num_fewshot: 0
+    - name: "hellaswag"
+      split: "validation"
+      num_samples: 10042
+      task: "hellaswag"
+      metric: "acc_norm"
+      chat_template: false
+    - name: "boolq"
+      split: "validation"
+      num_samples: 3270
+      task: "boolq"
+      metric: "acc"
+      chat_template: false
+    - name: "arc_easy"
+      split: "test"
+      num_samples: 2376
+      task: "arc_easy"
+      metric: "acc_norm"
+      chat_template: false
+  batch_size: 64   # Optimal batch size for 24GB+ VRAM
+
+# Output Directories (Persistent Modal Volume)
+paths:
+  output_dir: "/root/volume/results/task1"
+  checkpoint_dir: "/root/volume/checkpoints/task1"

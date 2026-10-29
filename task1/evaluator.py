@@ -12,14 +12,17 @@ Evaluation engine for Task 1:
   * Reports percentage-point changes relative to baseline.
 """
 
+import copy
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def extract_gsm8k_answer(text: str) -> Optional[str]:
@@ -59,19 +62,16 @@ def extract_gsm8k_answer(text: str) -> Optional[str]:
     return None
 
 
-def run_standalone_gsm8k_eval(
+def _single_device_gsm8k_eval(
     model: nn.Module,
     tokenizer: Any,
     test_examples: List[Dict[str, str]],
     device: torch.device,
     batch_size: int = 64,
     max_new_tokens: int = 1024,
+    tag: str = "",
 ) -> Dict[str, Any]:
-    """
-    High-throughput standalone GSM8K evaluation matching lm-eval gsm8k_cot specifications.
-    Uses non-thinking chat template, greedy decoding, 1024 new tokens, flexible extraction.
-    Uses left-padding for causal decoder-only batched generation.
-    """
+    """Single-device GSM8K evaluation worker."""
     model.eval()
     if hasattr(model, "config"):
         model.config.use_cache = True
@@ -88,9 +88,9 @@ def run_standalone_gsm8k_eval(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    # Optimized generation batch size for RTX 6000 Pro (48GB VRAM)
     actual_batch_size = min(batch_size, 64) if device.type == "cuda" else batch_size
-    print(f"[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded, KV-cached)...")
+    prefix = f"{tag} " if tag else ""
+    print(f"{prefix}[Eval-GSM8K] Evaluating {total_count} test examples with batch size {actual_batch_size} (left-padded, KV-cached)...")
 
     try:
         for i in range(0, total_count, actual_batch_size):
@@ -157,8 +157,8 @@ def run_standalone_gsm8k_eval(
                     "tokens_generated": gen_len,
                 })
 
-            if (i + actual_batch_size) % 200 == 0 or (i + actual_batch_size) >= total_count:
-                print(f"  Processed {min(i + actual_batch_size, total_count)}/{total_count} | Exact Match: {correct_count}/{min(i + actual_batch_size, total_count)} ({correct_count/min(i + actual_batch_size, total_count)*100:.2f}%)")
+                processed_so_far = min(i + actual_batch_size, total_count)
+                print(f"  {prefix}Batch {i // actual_batch_size + 1} | Processed {processed_so_far}/{total_count} | Exact Match: {correct_count}/{processed_so_far} ({correct_count/processed_so_far*100:.2f}%)", flush=True)
     finally:
         tokenizer.padding_side = orig_padding_side
         tokenizer.pad_token_id = orig_pad_token_id
@@ -177,25 +177,85 @@ def run_standalone_gsm8k_eval(
     }
 
 
-def run_standalone_likelihood_eval(
+def run_standalone_gsm8k_eval(
+    model: nn.Module,
+    tokenizer: Any,
+    test_examples: List[Dict[str, str]],
+    device: torch.device,
+    batch_size: int = 64,
+    max_new_tokens: int = 1024,
+) -> Dict[str, Any]:
+    """
+    High-throughput standalone GSM8K evaluation matching lm-eval gsm8k_cot specifications.
+    Uses non-thinking chat template, greedy decoding, 1024 new tokens, flexible extraction.
+    Automatically leverages dual GPUs (cuda:0 & cuda:1) when available.
+    """
+    can_use_dual_gpu = (
+        device.type == "cuda"
+        and device.index is None
+        and torch.cuda.device_count() >= 2
+        and len(test_examples) >= 4
+    )
+
+    if can_use_dual_gpu:
+        dev0 = torch.device("cuda:0")
+        dev1 = torch.device("cuda:1")
+        n = len(test_examples)
+        mid = n // 2
+        half0 = test_examples[:mid]
+        half1 = test_examples[mid:]
+
+        print(f"[Eval-GSM8K] Dual-GPU mode active: splitting {n} examples across {dev0} ({len(half0)}) and {dev1} ({len(half1)})...")
+        model_dev0 = model.to(dev0)
+        model_dev1 = copy.deepcopy(model).to(dev1)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut0 = executor.submit(_single_device_gsm8k_eval, model_dev0, tokenizer, half0, dev0, batch_size, max_new_tokens, "[GPU 0]")
+            fut1 = executor.submit(_single_device_gsm8k_eval, model_dev1, tokenizer, half1, dev1, batch_size, max_new_tokens, "[GPU 1]")
+            res0 = fut0.result()
+            res1 = fut1.result()
+
+        del model_dev1
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        combined_details = res0["details"] + res1["details"]
+        correct = res0["correct"] + res1["correct"]
+        total = res0["total"] + res1["total"]
+        unextractable = res0["unextractable"] + res1["unextractable"]
+        truncated = res0["truncated"] + res1["truncated"]
+        score = (correct / max(1, total)) * 100.0
+
+        return {
+            "metric": "exact_match",
+            "score": float(score),
+            "correct": correct,
+            "total": total,
+            "unextractable": unextractable,
+            "truncated": truncated,
+            "details": combined_details,
+        }
+    else:
+        return _single_device_gsm8k_eval(model, tokenizer, test_examples, device, batch_size, max_new_tokens)
+
+
+def _single_device_likelihood_eval(
     model: nn.Module,
     tokenizer: Any,
     dataset_name: str,
     examples: List[Dict[str, Any]],
     device: torch.device,
-    batch_size: int = 64,
+    batch_size: int = 16,
+    tag: str = "",
 ) -> Dict[str, Any]:
-    """
-    Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
-    Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
-    Processes candidates in vectorized batches for high throughput (~15s per benchmark on A100).
-    """
+    """Single-device batched candidate likelihood scoring worker."""
     model.eval()
     correct_raw = 0
     correct_norm = 0
     total = len(examples)
 
-    print(f"[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood...")
+    prefix = f"{tag} " if tag else ""
+    print(f"{prefix}[Eval-{dataset_name.upper()}] Evaluating {total} examples via batched candidate likelihood (batch size {batch_size})...")
 
     flat_candidates = []
     for ex_idx, item in enumerate(examples):
@@ -241,10 +301,16 @@ def run_standalone_likelihood_eval(
         with torch.inference_mode():
             outputs = model(input_ids=input_tensor, attention_mask=attn_tensor)
             logits = outputs.logits
-            shift_logits = logits[:, :-1, :]
-            shift_labels = input_tensor[:, 1:]
-            log_probs = torch.log_softmax(shift_logits, dim=-1)
-            token_logps = torch.gather(log_probs, 2, shift_labels.unsqueeze(-1)).squeeze(-1)
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = input_tensor[:, 1:].contiguous()
+            # Fused cross entropy computes -log P(target) directly without materializing
+            # a massive [batch, seq_len, 151936] log_softmax tensor (saving 10-20 GB VRAM)
+            neg_log_probs = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="none",
+            ).view(shift_labels.size())
+            token_logps = -neg_log_probs
 
         for k, c in enumerate(chunk):
             valid_len = len(c["full_ids"])
@@ -259,7 +325,7 @@ def run_standalone_likelihood_eval(
 
         if (i + batch_size) % (batch_size * 100) == 0 or (i + batch_size) >= len(flat_candidates):
             pct = min(100.0, (i + batch_size) / len(flat_candidates) * 100.0)
-            print(f"  Processed {min(i + batch_size, len(flat_candidates))}/{len(flat_candidates)} candidates ({pct:.1f}%)...")
+            print(f"  {prefix}Processed {min(i + batch_size, len(flat_candidates))}/{len(flat_candidates)} candidates ({pct:.1f}%)...")
 
     for ex_idx, item in enumerate(examples):
         gold_idx = item.get("gold_index", 0)
@@ -286,6 +352,65 @@ def run_standalone_likelihood_eval(
     }
 
 
+def run_standalone_likelihood_eval(
+    model: nn.Module,
+    tokenizer: Any,
+    dataset_name: str,
+    examples: List[Dict[str, Any]],
+    device: torch.device,
+    batch_size: int = 16,
+) -> Dict[str, Any]:
+    """
+    Batched candidate likelihood scoring for completion tasks (HellaSwag, BoolQ, ARC-Easy).
+    Computes candidate log-likelihoods without chat template, reporting raw and normalized accuracy.
+    Automatically leverages dual GPUs (cuda:0 & cuda:1) when available.
+    """
+    can_use_dual_gpu = (
+        device.type == "cuda"
+        and device.index is None
+        and torch.cuda.device_count() >= 2
+        and len(examples) >= 4
+    )
+
+    if can_use_dual_gpu:
+        dev0 = torch.device("cuda:0")
+        dev1 = torch.device("cuda:1")
+        n = len(examples)
+        mid = n // 2
+        half0 = examples[:mid]
+        half1 = examples[mid:]
+
+        print(f"[Eval-{dataset_name.upper()}] Dual-GPU mode active: splitting {n} examples across {dev0} ({len(half0)}) and {dev1} ({len(half1)})...")
+        model_dev0 = model.to(dev0)
+        model_dev1 = copy.deepcopy(model).to(dev1)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut0 = executor.submit(_single_device_likelihood_eval, model_dev0, tokenizer, dataset_name, half0, dev0, batch_size, "[GPU 0]")
+            fut1 = executor.submit(_single_device_likelihood_eval, model_dev1, tokenizer, dataset_name, half1, dev1, batch_size, "[GPU 1]")
+            res0 = fut0.result()
+            res1 = fut1.result()
+
+        del model_dev1
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        correct_raw = res0["correct_raw"] + res1["correct_raw"]
+        correct_norm = res0["correct_norm"] + res1["correct_norm"]
+        total = res0["total"] + res1["total"]
+        acc_raw = (correct_raw / max(1, total)) * 100.0
+        acc_norm = (correct_norm / max(1, total)) * 100.0
+
+        return {
+            "acc": float(acc_raw),
+            "acc_norm": float(acc_norm),
+            "correct_raw": correct_raw,
+            "correct_norm": correct_norm,
+            "total": total,
+        }
+    else:
+        return _single_device_likelihood_eval(model, tokenizer, dataset_name, examples, device, batch_size)
+
+
 def evaluate_checkpoint_condition(
     model: nn.Module,
     tokenizer: Any,
@@ -303,6 +428,10 @@ def evaluate_checkpoint_condition(
 
     # PDF invariant: Evaluate all models in FP16 with dropout disabled
     model.eval()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    if hasattr(model, "config"):
+        model.config.use_cache = True
     if device.type == "cuda":
         model = model.half()
     for m in model.modules():
@@ -317,26 +446,115 @@ def evaluate_checkpoint_condition(
         pass
 
     if has_lmeval:
-        print("[Evaluator] lm-evaluation-harness detected. Attempting native harness tasks...")
+        print("[Evaluator] Native lm-evaluation-harness detected. Initializing HFLM harness...", flush=True)
         try:
             from lm_eval.models.huggingface import HFLM
             eval_batch_size = getattr(config.evaluation, "batch_size", 64)
-            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size)
-            eval_output = lm_eval.simple_evaluate(
+            hflm_device = str(device) if device.type == "cuda" else "cpu"
+            lm_obj = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=eval_batch_size, device=hflm_device)
+
+            # 1. GSM8K via lm-eval: num_fewshot=0, chat template enabled, greedy, 1024 token cap
+            print(f"[Evaluator - lm-eval] Running GSM8K (gsm8k_cot) with chat_template=True, greedy decoding, 1024-token cap...", flush=True)
+            gsm_eval = lm_eval.simple_evaluate(
                 model=lm_obj,
-                tasks=["gsm8k_cot", "hellaswag", "boolq", "arc_easy"],
+                tasks=["gsm8k_cot"],
                 num_fewshot=0,
+                apply_chat_template=True,
+                gen_kwargs={"max_gen_toks": 1024, "do_sample": False, "temperature": 0.0},
+                log_samples=True,
                 batch_size=eval_batch_size,
             )
-            for task_name, task_metrics in eval_output.get("results", {}).items():
-                primary = task_metrics.get("acc_norm,none", task_metrics.get("acc,none", task_metrics.get("exact_match,none", 0.0)))
-                condition_results["scores"][task_name] = float(primary * 100.0)
+
+            gsm_res = gsm_eval.get("results", {}).get("gsm8k_cot", {})
+            gsm_score = (
+                gsm_res.get("exact_match,flexible-extract")
+                or gsm_res.get("exact_match,strict-match")
+                or gsm_res.get("exact_match,none")
+                or gsm_res.get("acc,none", 0.0)
+            )
+            condition_results["scores"]["gsm8k"] = float(gsm_score * 100.0)
+
+            # Extract per-example outputs, gold answers, and truncation flags
+            gsm_samples = gsm_eval.get("samples", {}).get("gsm8k_cot", [])
+            unextractable_count = 0
+            truncated_count = 0
+            processed_samples = []
+            for s in gsm_samples:
+                resps = s.get("resps", [[""]])
+                gen_text = resps[0][0] if (resps and resps[0]) else ""
+                pred = extract_gsm8k_answer(gen_text)
+                gold = extract_gsm8k_answer(s.get("target", ""))
+                is_trunc = len(tokenizer.encode(gen_text, add_special_tokens=False)) >= 1024
+                if is_trunc:
+                    truncated_count += 1
+                if pred is None:
+                    unextractable_count += 1
+                processed_samples.append({
+                    "doc_id": s.get("doc_id"),
+                    "question": s.get("arguments", {}).get("gen_args_0", {}).get("arg_0", "") if isinstance(s.get("arguments"), dict) else "",
+                    "target": s.get("target", ""),
+                    "gold_answer": gold,
+                    "generated_text": gen_text,
+                    "extracted_answer": pred,
+                    "is_correct": bool(pred is not None and gold is not None and pred == gold),
+                    "truncated": is_trunc,
+                })
+
+            condition_results["metadata"]["gsm8k"] = {
+                "unextractable": unextractable_count,
+                "truncated": truncated_count,
+            }
+            gsm_out_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.json")
+            with open(gsm_out_file, "w", encoding="utf-8") as f_gsm:
+                json.dump(processed_samples or gsm_samples, f_gsm, indent=2)
+            gsm_jsonl_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.jsonl")
+            with open(gsm_jsonl_file, "w", encoding="utf-8") as f_jl:
+                for ps in (processed_samples or gsm_samples):
+                    f_jl.write(json.dumps(ps) + "\n")
+            print(f"[Evaluator - lm-eval] GSM8K completed: Exact Match = {condition_results['scores']['gsm8k']:.2f}% | Unextractable: {unextractable_count} | Truncated: {truncated_count}", flush=True)
+
+            # 2. Completion benchmarks via lm-eval: stock completion prompts WITHOUT chat template
+            print(f"[Evaluator - lm-eval] Running completion benchmarks (hellaswag, boolq, arc_easy) without chat template...", flush=True)
+            comp_eval = lm_eval.simple_evaluate(
+                model=lm_obj,
+                tasks=["hellaswag", "boolq", "arc_easy"],
+                num_fewshot=0,
+                apply_chat_template=False,
+                log_samples=True,
+                batch_size=eval_batch_size,
+            )
+
+            c_results = comp_eval.get("results", {})
+            # HellaSwag: acc_norm primary, acc raw
+            hs_res = c_results.get("hellaswag", {})
+            condition_results["scores"]["hellaswag"] = float(hs_res.get("acc_norm,none", hs_res.get("acc,none", 0.0)) * 100.0)
+            condition_results["scores"]["hellaswag_raw"] = float(hs_res.get("acc,none", 0.0) * 100.0)
+
+            # BoolQ: acc
+            bq_res = c_results.get("boolq", {})
+            condition_results["scores"]["boolq"] = float(bq_res.get("acc,none", 0.0) * 100.0)
+
+            # ARC-Easy: acc_norm primary, acc raw
+            arc_res = c_results.get("arc_easy", {})
+            condition_results["scores"]["arc_easy"] = float(arc_res.get("acc_norm,none", arc_res.get("acc,none", 0.0)) * 100.0)
+            condition_results["scores"]["arc_easy_raw"] = float(arc_res.get("acc,none", 0.0) * 100.0)
+
+            # Redundant storage: raw lm-eval dictionary
+            raw_lmeval_file = os.path.join(output_dir, f"lmeval_results_{condition_name}.json")
+            with open(raw_lmeval_file, "w", encoding="utf-8") as f_raw:
+                json.dump({"gsm8k": gsm_eval.get("results"), "completion": comp_eval.get("results")}, f_raw, indent=2)
+
+            res_path = os.path.join(output_dir, f"eval_summary_{condition_name}.json")
+            with open(res_path, "w", encoding="utf-8") as f:
+                json.dump(condition_results, f, indent=2)
+            print(f"[Evaluator - lm-eval] Benchmark evaluation successful for {condition_name}: {condition_results['scores']}", flush=True)
             return condition_results
         except Exception as e:
-            print(f"[Evaluator] lm_eval run error: {e}. Falling back to internal standalone runner.")
+            print(f"[Evaluator] Warning: Native lm_eval run encountered error: {e}. Falling back to internal standalone runner.", flush=True)
 
     print("[Evaluator] Running internal standalone evaluator...")
     from datasets import load_dataset
+    eval_batch_size = getattr(config.evaluation, "batch_size", 16)
 
     # 1. GSM8K
     try:
@@ -345,7 +563,7 @@ def evaluate_checkpoint_condition(
         except Exception:
             gsm8k_data = load_dataset("gsm8k", "main", split="test")
         gsm8k_samples = [{"question": x["question"], "answer": x["answer"]} for x in gsm8k_data]
-        gsm8k_res = run_standalone_gsm8k_eval(model, tokenizer, gsm8k_samples, device, batch_size=config.evaluation.batch_size)
+        gsm8k_res = run_standalone_gsm8k_eval(model, tokenizer, gsm8k_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["gsm8k"] = gsm8k_res["score"]
         condition_results["metadata"]["gsm8k"] = {
             "unextractable": gsm8k_res["unextractable"],
@@ -354,13 +572,23 @@ def evaluate_checkpoint_condition(
         gsm_out_file = os.path.join(output_dir, f"gsm8k_details_{condition_name}.json")
         with open(gsm_out_file, "w", encoding="utf-8") as f:
             json.dump(gsm8k_res["details"], f, indent=2)
+        gsm_out_jsonl = os.path.join(output_dir, f"gsm8k_details_{condition_name}.jsonl")
+        with open(gsm_out_jsonl, "w", encoding="utf-8") as f_jl:
+            for d in gsm8k_res["details"]:
+                f_jl.write(json.dumps(d) + "\n")
     except Exception as e:
         print(f"[Warning] Failed GSM8K eval: {e}")
         condition_results["scores"]["gsm8k"] = 0.0
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # 2. HellaSwag
     try:
-        hs_data = load_dataset("hellaswag", split="validation")
+        try:
+            hs_data = load_dataset("hellaswag", split="validation")
+        except Exception:
+            hs_data = load_dataset("Rowan/hellaswag", split="validation")
         hs_samples = []
         for x in hs_data:
             hs_samples.append({
@@ -368,12 +596,15 @@ def evaluate_checkpoint_condition(
                 "choices": x["endings"],
                 "gold_index": int(x["label"]),
             })
-        hs_res = run_standalone_likelihood_eval(model, tokenizer, "hellaswag", hs_samples, device)
+        hs_res = run_standalone_likelihood_eval(model, tokenizer, "hellaswag", hs_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["hellaswag"] = hs_res["acc_norm"]
         condition_results["scores"]["hellaswag_raw"] = hs_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed HellaSwag eval: {e}")
         condition_results["scores"]["hellaswag"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # 3. BoolQ
     try:
@@ -385,11 +616,14 @@ def evaluate_checkpoint_condition(
                 "choices": ["false", "true"],
                 "gold_index": 1 if x["answer"] else 0,
             })
-        boolq_res = run_standalone_likelihood_eval(model, tokenizer, "boolq", boolq_samples, device)
+        boolq_res = run_standalone_likelihood_eval(model, tokenizer, "boolq", boolq_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["boolq"] = boolq_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed BoolQ eval: {e}")
         condition_results["scores"]["boolq"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     # 4. ARC-Easy
     try:
@@ -402,12 +636,15 @@ def evaluate_checkpoint_condition(
                 "choices": x["choices"]["text"],
                 "gold_index": label_map.get(x["answerKey"], 0),
             })
-        arc_res = run_standalone_likelihood_eval(model, tokenizer, "arc_easy", arc_samples, device)
+        arc_res = run_standalone_likelihood_eval(model, tokenizer, "arc_easy", arc_samples, device, batch_size=eval_batch_size)
         condition_results["scores"]["arc_easy"] = arc_res["acc_norm"]
         condition_results["scores"]["arc_easy_raw"] = arc_res["acc"]
     except Exception as e:
         print(f"[Warning] Failed ARC-Easy eval: {e}")
         condition_results["scores"]["arc_easy"] = 0.0
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     res_path = os.path.join(output_dir, f"eval_summary_{condition_name}.json")
     with open(res_path, "w", encoding="utf-8") as f:

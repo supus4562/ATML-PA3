@@ -1,0 +1,17 @@
+{
+  "condition": "full_ft_final",
+  "scores": {
+    "gsm8k": 63.457164518574686,
+    "hellaswag": 46.13622784305915,
+    "hellaswag_raw": 37.36307508464449,
+    "boolq": 60.948012232415905,
+    "arc_easy": 64.3097643097643,
+    "arc_easy_raw": 67.17171717171718
+  },
+  "metadata": {
+    "gsm8k": {
+      "unextractable": 4,
+      "truncated": 26
+    }
+  }
+}

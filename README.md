@@ -115,7 +115,76 @@ Available stages:
 
 ---
 
-## 5. Output Deliverables in `results/task1/`
+## 5. Execution Guide for Kaggle (NVIDIA Tesla T4 / P100 16GB)
+
+The `kaggle-gpu` branch incorporates specialized memory optimizations to run flawlessly within **16 GB VRAM**:
+- **Sequential Model Offloading**: Inactive models are offloaded to CPU with explicit CUDA cache clearing so only a single model resides on GPU at any given moment.
+- **Fused F.cross_entropy Scoring**: Replaces explicit `log_softmax` matrix generation during likelihood evaluation, saving 10–20 GB of intermediate tensor allocations.
+- **Tuned Batch Sizes**: Evaluation batch size calibrated to 16 for safe, fast completion.
+- **Adaptive Workers**: DataLoader concurrency adapted to Kaggle's `/dev/shm` shared memory boundaries.
+
+### Option A: Using the Interactive Jupyter Notebook
+Open and run [`kaggle_task1.ipynb`](file:///home/supus/Projects/ATML/ATML-PA3/kaggle_task1.ipynb) directly in Kaggle:
+1. Upload `kaggle_task1.ipynb` to Kaggle Notebooks.
+2. Select **Settings** $\to$ **Accelerator** $\to$ **GPU T4 x 2** or **GPU P100**.
+3. Toggle **Internet** $\to$ **On**.
+4. Run all cells.
+
+### Option B: Using the Command Line / Terminal on Kaggle
+```bash
+# Clone the kaggle-gpu branch
+git clone -b kaggle-gpu https://github.com/supus4562/ATML-PA3.git
+cd ATML-PA3
+
+# Run the complete pipeline
+bash run_kaggle.sh
+```
+
+---
+
+## 6. Execution Guide for Modal Cloud (modal.com)
+
+The `modal` branch adds serverless execution on **Modal (modal.com)** with persistent cloud volumes and real-time streaming:
+- **Persistent Cloud Storage (`pa3-volume`)**: Checkpoints, tokenized data cache, and results are stored in a durable cloud volume and committed automatically after each checkpoint and stage.
+- **Live tqdm Progress Bar & Streaming**: Every single optimizer update ($1, 2, \dots, 1250$) displays in a real-time `tqdm` progress bar with live metrics (`sft_loss`, `lr`, `grad`, `toks`, `s/it`), backed by redundant streaming into `.jsonl` and `.csv`.
+- **Native `lm-evaluation-harness`**: Executes GSM8K with non-thinking chat template ($1,024$-token cap, greedy decoding) and HellaSwag, BoolQ, ARC-Easy with completion prompts, saving per-example outputs and predictions.
+- **Aggressively Optimized for High-Memory GPUs**: With 48GB–96GB VRAM, activation checkpointing is turned off (`gradient_checkpointing: false`), delivering **4–5 it/s** throughput (~$0.2$s/step), so full 1,250 updates finish in under 5 minutes per variant!
+- **Target Hardware Acceleration**:
+  - `modal run modal_run.py` (Default: **NVIDIA RTX PRO 6000 Ada (48GB)**)
+  - `modal run modal_run.py --gpu RTX-PRO-6000:2` (**Dual RTX PRO 6000 (96GB VRAM)**)
+  - `modal run modal_run.py --gpu H100` (**NVIDIA H100 (80GB VRAM)**)
+  - `modal run modal_run.py --gpu A10G` (**NVIDIA A10G (24GB VRAM)**)
+  - `modal run modal_run.py --gpu A100` (**NVIDIA A100 (40/80GB VRAM)**)
+
+### Quick Start on Modal:
+```bash
+# 1. Install modal locally
+pip install modal
+
+# 2. Authenticate with your Modal account (with your $30 compute credits)
+modal setup
+
+# 3. Dry-run verification (checks container, CUDA, volume, and packages in ~30s)
+modal run modal_run.py --dry-run
+
+# 4. Launch full Task 1 pipeline on NVIDIA RTX PRO 6000 Ada (48GB)
+modal run modal_run.py
+
+# 5. Launch on 96GB Dual RTX PRO 6000 (for massive VRAM headroom)
+modal run modal_run.py --gpu RTX-PRO-6000:2
+
+# 6. Run a specific stage (e.g. train_full_ft or baseline)
+modal run modal_run.py --stage train_full_ft
+
+# 7. Download all results from cloud volume directly to local repo
+modal run modal_run.py --download
+# (Or alternatively: modal volume get pa3-volume results/ ./results/)
+```
+
+
+---
+
+## 7. Output Deliverables in `results/task1/`
 
 Upon completion, all required evidence is automatically generated in `results/task1/`:
 - `metrics_summary.json`: Benchmark scores across all 7 evaluation conditions and primary score changes from baseline in percentage points.
@@ -126,55 +195,29 @@ Upon completion, all required evidence is automatically generated in `results/ta
 
 ---
 
-## 6. Task 2: Vision-Language Models and Visual Grounding
+## 8. Task 2: Vision-Language Models & Visual Grounding (Modal Cloud Execution)
 
-High-performance implementation of multimodal instruction tuning and visual grounding evaluation.
+Task 2 implements multimodal instruction tuning with SigLIP-224 vision encoder, a 2-layer trainable MLP connector, and Qwen3-0.6B LoRA, evaluated across 4 image conditions (correct, complementary swap, mismatched, no-image) with 4,000 bootstrap resamples.
 
-### Model Architecture & Key Invariants
-- **Vision Backbone**: `google/siglip-base-patch16-224` (always frozen). Preprocesses images to 196 patch features in $14 \times 14$ spatial order with final LayerNorm. Cached in FP16 to disk; encoder is completely unloaded from GPU memory before Qwen initialization to save VRAM.
-- **Visual Connector**: 2-layer MLP (`Linear(768, 1024) -> GELU -> Linear(1024, 1024)`), trainable across all 3 stages. Evaluates initial vs final activation magnitudes against text token embeddings.
-- **Language Model**: `Qwen/Qwen3-0.6B` (thinking disabled). Original weights remain frozen throughout. LoRA ($r=16, \alpha=32$, dropout $0.05$) applied to projections `[q_proj, k_proj, v_proj, o_proj]` during Stages 2 and 3.
+### Optimizations for NVIDIA A100 on Modal
+- **Pre-Cached FP16 Patch Features**: SigLIP extracts and normalizes 196 patch features in FP16, permanently cached to `/root/volume/data_cache/task2/siglip_features`. The heavy vision encoder is completely unloaded from GPU memory before Qwen initializes.
+- **A100 Tensor Cores & High Memory Bandwidth**: Microbatch 8, gradient accumulation 2 (effective batch 16). With A100's high memory bandwidth (1.5–2.0 TB/s), training runs at near-memory-bound speeds.
+- **Durable Checkpointing**: Model states and connector weights are committed to `pa3-volume` every 250 updates and at stage endpoints (2250, 3750, 4500).
 
-### 3-Stage Curriculum Training (4,500 Updates = 72,000 Examples)
-- **Stage 1 (Caption Alignment)**:
-  - 2,250 updates (2 full passes over 18,000 COCO captions)
-  - Connector trained at peak LR $10^{-3}$; LLM entirely frozen.
-- **Stage 2 (Visual Instruction Tuning)**:
-  - 1,500 updates (24,000 examples)
-  - Connector peak LR $10^{-4}$, LoRA peak LR $2 \times 10^{-5}$
-  - Balanced mixture: 50% presence grounding, 25% counting grounding, 25% caption replay.
-- **Stage 3 (Natural VQA Specialization)**:
-  - 750 updates (12,000 examples)
-  - Connector peak LR $5 \times 10^{-5}$, LoRA peak LR $10^{-5}$
-  - Domain mixture: 70% VQAv2, 10% presence, 10% counting, 10% caption replay.
-- **Loss Invariant**: Example-weighted causal cross-entropy (averaged over response tokens per example, then across effective batch 16 = microbatch 8 $\times$ accumulation 2).
-
-### Evaluation Protocol
-Evaluates on 3 benchmarks (Presence Grounding, Counting Grounding, Natural VQAv2) across **4 image conditions**:
-1. **Correct**: Original image paired with question.
-2. **Complementary Swap**: Image swapped with semantic counter-example.
-3. **Mismatched**: Unrelated random image.
-4. **No-Image Ablation**: Zeroed visual tokens (pure text prior test).
-
-Metrics reported:
-- Exact Match / VQA Soft Consensus
-- Complete Pair Accuracy
-- Identical-Answer Rate & Empty-Answer Rate
-- Mean Reference NLL
-- Correct-Image Advantage: $\Delta\text{Acc} = \text{Acc}_{\text{correct}} - \text{Acc}_{\text{swap}}$, $\Delta\text{NLL} = \text{NLL}_{\text{swap}} - \text{NLL}_{\text{correct}}$
-- 95% Confidence Intervals via 4,000 bootstrap resamples over complete question pairs.
-
----
-
-## 7. Running Task 2
-
-### Workstation / A100 Server Execution
+### Launching Task 2 on Modal Cloud
 ```bash
-# Run full Task 2 end-to-end pipeline:
-bash run_task2.sh
+# 1. Run complete Task 2 pipeline on NVIDIA A100 (Default):
+modal run modal_run.py --task task2 --gpu A100
 
-# Or invoke with custom stages:
-python3 -m task2.run_all --stages stage1 stage2 stage3 evaluate synthesize
+# 2. Run specific stages:
+modal run modal_run.py --task task2 --stage "stage1 stage2"
+modal run modal_run.py --task task2 --stage "stage3 evaluate synthesize"
+
+# 3. Run on single NVIDIA RTX 6000 Ada:
+modal run modal_run.py --task task2 --gpu RTX-PRO-6000
+
+# 4. Download all Task 2 and Task 1 results to local workspace:
+modal run modal_run.py --download
 ```
 
 ### Available Stages for Task 2

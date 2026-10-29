@@ -1,0 +1,17 @@
+{
+  "condition": "lora_4_final",
+  "scores": {
+    "gsm8k": 53.980288097043214,
+    "hellaswag": 47.30133439553874,
+    "hellaswag_raw": 37.84106751643099,
+    "boolq": 67.64525993883792,
+    "arc_easy": 63.55218855218855,
+    "arc_easy_raw": 65.40404040404042
+  },
+  "metadata": {
+    "gsm8k": {
+      "unextractable": 4,
+      "truncated": 1486
+    }
+  }
+}
