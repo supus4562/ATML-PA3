@@ -1,0 +1,17 @@
+{
+  "condition": "oplora_16_final",
+  "scores": {
+    "gsm8k": 60.424564063684606,
+    "hellaswag": 47.380999800836484,
+    "hellaswag_raw": 37.81119298944433,
+    "boolq": 71.19266055045873,
+    "arc_easy": 63.2996632996633,
+    "arc_easy_raw": 65.74074074074075
+  },
+  "metadata": {
+    "gsm8k": {
+      "unextractable": 36,
+      "truncated": 256
+    }
+  }
+}
