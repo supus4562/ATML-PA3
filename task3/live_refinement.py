@@ -40,6 +40,7 @@ def extract_boxed_answer(text: str) -> str:
 def run_live_refinement_experiment(
     questions: List[Dict[str, Any]],
     model_name: str = "Qwen/Qwen2.5-3B-Instruct",
+    revision: Optional[str] = "aa8e72537993ba99e69dfaafa59ed015b17504d1",
     device: Optional[torch.device] = None,
     output_dir: Optional[str] = None,
     seed: int = 6304,
@@ -48,9 +49,12 @@ def run_live_refinement_experiment(
     Executes Step 4 Live Generation on the 50 fixed MATH evaluation questions.
     """
     dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\n[Live Refinement] Loading {model_name} on {dev} in FP16...")
+    print(f"\n[Live Refinement] Loading {model_name} (revision: {revision}) on {dev} in FP16...")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tok_kwargs = {"trust_remote_code": True}
+    if revision:
+        tok_kwargs["revision"] = revision
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **tok_kwargs)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
@@ -59,6 +63,8 @@ def run_live_refinement_experiment(
         "torch_dtype": torch_dtype,
         "trust_remote_code": True,
     }
+    if revision:
+        model_kwargs["revision"] = revision
     if dev.type == "cuda":
         model_kwargs["attn_implementation"] = "sdpa"
 

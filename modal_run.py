@@ -66,6 +66,7 @@ image = (
         "sentencepiece>=0.2.0",
         "pyarrow>=14.0.0",
         "math-verify",
+        "gdown>=5.1.0",
     )
     .add_local_dir(
         ".",
@@ -132,10 +133,19 @@ def _execute_pipeline_in_container(
         os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task2", exist_ok=True)
         module_name = "task2.run_all"
     elif task_normalized == "task3":
-        os.makedirs(f"{VOLUME_MOUNT_PATH}/data/ATML-PA3-Data", exist_ok=True)
+        dataset_dir = f"{VOLUME_MOUNT_PATH}/data/ATML-PA3-Data"
+        os.makedirs(dataset_dir, exist_ok=True)
         os.makedirs(f"{VOLUME_MOUNT_PATH}/checkpoints/task3", exist_ok=True)
         os.makedirs(f"{VOLUME_MOUNT_PATH}/results/task3", exist_ok=True)
         module_name = "task3.run_all"
+
+        # Auto-download dataset if not already present on volume
+        from task3.download_data import verify_dataset, download_dataset
+        if not verify_dataset(dataset_dir):
+            print(f"[Modal Container] ATML-PA3-Data not detected in '{dataset_dir}'. Downloading from Google Drive...", flush=True)
+            download_dataset(dataset_dir)
+            volume.commit()
+            print("[Modal Container] Committed downloaded dataset to pa3-volume.", flush=True)
     else:
         raise ValueError(f"Unknown task: '{task}'")
 

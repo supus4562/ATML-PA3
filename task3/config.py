@@ -45,6 +45,7 @@ class AdaptiveConfig:
 @dataclass
 class LiveGenConfig:
     model_name: str = "Qwen/Qwen2.5-3B-Instruct"
+    revision: Optional[str] = "aa8e72537993ba99e69dfaafa59ed015b17504d1"
     num_questions: int = 50
     batch_size: int = 1
     temperature: float = 0.7

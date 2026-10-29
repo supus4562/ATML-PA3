@@ -20,3 +20,4 @@ pillow>=10.0.0
 modal>=0.60.0
 pyarrow>=14.0.0
 math-verify
+gdown>=5.1.0

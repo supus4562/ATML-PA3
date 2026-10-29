@@ -104,6 +104,11 @@ def main():
                 data_dir = cand
                 config.paths.data_dir = cand
                 break
+        else:
+            # None of the fallback paths exist: trigger download
+            from task3.download_data import download_dataset
+            print(f"[Data] Dataset not found in paths. Automatically downloading from Google Drive to '{data_dir}'...")
+            download_dataset(data_dir)
 
     print(f"[Config] Data directory: {data_dir}")
     print(f"[Config] Output directory: {config.paths.output_dir}")
@@ -346,6 +351,7 @@ def main():
         live_results = run_live_refinement_experiment(
             questions=live_questions,
             model_name=config.live_generation.model_name,
+            revision=getattr(config.live_generation, "revision", "aa8e72537993ba99e69dfaafa59ed015b17504d1"),
             device=device,
             output_dir=config.paths.output_dir,
             seed=config.seed,
