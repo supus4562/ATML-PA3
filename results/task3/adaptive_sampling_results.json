@@ -1,0 +1,108 @@
+{
+  "dev_threshold_selection": {
+    "MATH": {
+      "dataset": "MATH",
+      "dev_fixed32_sc_acc": 82.0,
+      "best_agreement_thresholds": {
+        "tau": 0.625,
+        "dev_acc": 81.55,
+        "dev_cost": 7149.007,
+        "dev_rollouts": 9.258
+      },
+      "best_quality_thresholds": {
+        "tau": 0.5,
+        "gamma": 0.0,
+        "dev_acc": 81.2,
+        "dev_cost": 5587.926,
+        "dev_rollouts": 7.41
+      }
+    },
+    "MathVista": {
+      "dataset": "MathVista",
+      "dev_fixed32_sc_acc": 63.65,
+      "best_agreement_thresholds": {
+        "tau": 0.5,
+        "dev_acc": 63.2,
+        "dev_cost": 3469.564,
+        "dev_rollouts": 9.04
+      },
+      "best_quality_thresholds": {
+        "tau": 0.5,
+        "gamma": 0.0,
+        "dev_acc": 63.449999999999996,
+        "dev_cost": 3835.5625,
+        "dev_rollouts": 10.076
+      }
+    }
+  },
+  "eval_simulation": {
+    "MATH": {
+      "agreement_based": {
+        "controller": "agreement_based",
+        "tau": 0.625,
+        "gamma": 0.0,
+        "accuracy": 73.3875,
+        "mean_token_cost": 10251.288875,
+        "mean_rollouts": 11.9995,
+        "stopping_distribution_pct": {
+          "4": 66.1125,
+          "8": 5.4125,
+          "16": 1.1875,
+          "32": 27.287499999999998
+        },
+        "incorrect_early_stops": 693,
+        "recoverable_by_fixed32": 42
+      },
+      "quality_aware": {
+        "controller": "quality_aware",
+        "tau": 0.5,
+        "gamma": 0.0,
+        "accuracy": 72.7125,
+        "mean_token_cost": 7610.110625,
+        "mean_rollouts": 8.941,
+        "stopping_distribution_pct": {
+          "4": 76.5,
+          "8": 5.9125,
+          "16": 1.375,
+          "32": 16.2125
+        },
+        "incorrect_early_stops": 1232,
+        "recoverable_by_fixed32": 139
+      }
+    },
+    "MathVista": {
+      "agreement_based": {
+        "controller": "agreement_based",
+        "tau": 0.5,
+        "gamma": 0.0,
+        "accuracy": 61.7,
+        "mean_token_cost": 3088.015625,
+        "mean_rollouts": 9.12,
+        "stopping_distribution_pct": {
+          "4": 74.3,
+          "8": 7.249999999999999,
+          "16": 2.1,
+          "32": 16.35
+        },
+        "incorrect_early_stops": 1943,
+        "recoverable_by_fixed32": 343
+      },
+      "quality_aware": {
+        "controller": "quality_aware",
+        "tau": 0.5,
+        "gamma": 0.0,
+        "accuracy": 62.324999999999996,
+        "mean_token_cost": 3437.19025,
+        "mean_rollouts": 10.3535,
+        "stopping_distribution_pct": {
+          "4": 67.4875,
+          "8": 9.325,
+          "16": 3.2,
+          "32": 19.9875
+        },
+        "incorrect_early_stops": 1703,
+        "recoverable_by_fixed32": 256
+      }
+    }
+  }
+}

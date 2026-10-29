@@ -1,0 +1,61 @@
+{
+  "MATH": {
+    "dataset": "MATH",
+    "num_questions": 800,
+    "length_analysis": {
+      "mean_spearman_with_correctness": -0.07650940720159813,
+      "mean_quartile_diff": -0.04545612373737374
+    },
+    "score_quartile_contrasts": {
+      "mean_logp": {
+        "top_quartile_acc": 67.390625,
+        "bottom_quartile_acc": 59.51562500000001,
+        "advantage_pp": 7.875
+      },
+      "mean_self_certainty": {
+        "top_quartile_acc": 69.203125,
+        "bottom_quartile_acc": 57.1875,
+        "advantage_pp": 12.015625
+      }
+    }
+  },
+  "MathVista": {
+    "dataset": "MathVista",
+    "num_questions": 800,
+    "length_analysis": {
+      "mean_spearman_with_correctness": -0.04882332510360254,
+      "mean_quartile_diff": -0.0365661525974026
+    },
+    "score_quartile_contrasts": {
+      "mean_logp": {
+        "top_quartile_acc": 53.62471590909092,
+        "bottom_quartile_acc": 51.82241137640954,
+        "advantage_pp": 1.802304532681371
+      },
+      "mean_self_certainty": {
+        "top_quartile_acc": 55.28290416181041,
+        "bottom_quartile_acc": 51.29005317599068,
+        "advantage_pp": 3.9928509858197363
+      },
+      "visual_engagement": {
+        "top_quartile_acc": 54.6800766865698,
+        "bottom_quartile_acc": 50.63505145758569,
+        "advantage_pp": 4.045025228984121
+      },
+      "visconf": {
+        "top_quartile_acc": 56.587444760101,
+        "bottom_quartile_acc": 48.80590277777778,
+        "advantage_pp": 7.781541982323232
+      },
+      "visconf_tokenwise": {
+        "top_quartile_acc": 56.485343626585404,
+        "bottom_quartile_acc": 48.89623397435897,
+        "advantage_pp": 7.589109652226428
+      }
+    },
+    "visconf_fusion_analysis": {
+      "mean_covariance_token_vs_rollout": -0.0022433811420689005,
+      "mean_confidence_vision_pearson_r": -0.21008350956371827
+    }
+  }
+}
