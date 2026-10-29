@@ -64,6 +64,8 @@ image = (
         "safetensors>=0.4.0",
         "scikit-learn>=1.4.0",
         "sentencepiece>=0.2.0",
+        "pyarrow>=14.0.0",
+        "math-verify",
     )
     .add_local_dir(
         ".",

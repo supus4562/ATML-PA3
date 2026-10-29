@@ -92,11 +92,18 @@ def main():
     # Check data directory
     data_dir = config.paths.data_dir
     if not os.path.exists(data_dir):
-        # Check volume path fallback
-        vol_path = "/root/volume/data/ATML-PA3-Data"
-        if os.path.exists(vol_path):
-            data_dir = vol_path
-            config.paths.data_dir = vol_path
+        fallback_candidates = [
+            "/root/volume/data/ATML-PA3-Data",
+            "/root/volume/ATML-PA3-Data",
+            os.path.expanduser("~/data/ATML-PA3-Data"),
+            "data/ATML-PA3-Data",
+            "ATML-PA3-Data",
+        ]
+        for cand in fallback_candidates:
+            if os.path.exists(cand):
+                data_dir = cand
+                config.paths.data_dir = cand
+                break
 
     print(f"[Config] Data directory: {data_dir}")
     print(f"[Config] Output directory: {config.paths.output_dir}")

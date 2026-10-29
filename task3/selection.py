@@ -247,8 +247,12 @@ def compute_paired_bootstrap_ci(
         boot_means[b] = np.mean(arr[indices])
 
     alpha = 1.0 - confidence_level
-    lower = float(np.percentile(boot_means, 100 * (alpha / 2.0)))
-    upper = float(np.percentile(boot_means, 100 * (1.0 - alpha / 2.0)))
+    try:
+        lower = float(np.percentile(boot_means, 100 * (alpha / 2.0), method="linear"))
+        upper = float(np.percentile(boot_means, 100 * (1.0 - alpha / 2.0), method="linear"))
+    except TypeError:
+        lower = float(np.percentile(boot_means, 100 * (alpha / 2.0), interpolation="linear"))
+        upper = float(np.percentile(boot_means, 100 * (1.0 - alpha / 2.0), interpolation="linear"))
     mean_val = float(np.mean(arr))
 
     return mean_val, lower, upper
