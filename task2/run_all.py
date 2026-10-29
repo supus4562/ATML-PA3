@@ -19,7 +19,7 @@ import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from task2.config import Task2Config
-from task2.vision import SigLIPFeatureExtractor, cache_image_features
+from task2.vision import SigLIPFeatureExtractor, cache_image_features, cache_real_coco_features
 from task2.models import VisualConnector, VLMModel, calibrate_connector_scale
 from task2.data import prepare_task2_dataset_splits
 from task2.trainer import train_task2
@@ -119,7 +119,7 @@ def main():
         return
 
     # 2. Stage: Vision Feature Caching (SigLIP)
-    if run_all or any(s in args.stages for s in ["stage1", "stage2", "stage3", "evaluate"]):
+    if run_all or any(s in args.stages for s in ["stage1", "stage2", "stage3", "evaluate", "cache_features"]):
         print("\n" + "=" * 80)
         print("STEP 2: SIGLIP FEATURE EXTRACTION & CACHING (FP16)")
         print("=" * 80)
@@ -127,16 +127,32 @@ def main():
         cached_count = len([f for f in os.listdir(config.data.feature_cache_dir) if f.endswith(".pt")])
         print(f"[Vision Cache] Found {cached_count} pre-cached feature files in {config.data.feature_cache_dir}.")
 
-        if cached_count == 0 and device.type == "cuda":
-            try:
-                extractor = SigLIPFeatureExtractor(
-                    model_name=config.vision.model_name_or_path,
-                    device=device,
-                    dtype=torch.float16,
-                )
-                extractor.unload()
-            except Exception as e:
-                print(f"[Vision Cache] Note: SigLIP extraction skipped or running in cached mode: {e}")
+        all_ids = data_splits["all_image_ids"]
+        split_map = data_splits["image_split_map"]
+        suffix = "_comp49.pt" if config.vision.compress_2x2 else "_196.pt"
+        missing_count = sum(1 for img_id in all_ids if not os.path.exists(os.path.join(config.data.feature_cache_dir, f"img_{img_id}{suffix}")))
+
+        if missing_count > 0:
+            print(f"[Vision Cache] Extracting real SigLIP features for {missing_count} missing images on {device}...")
+            extractor = SigLIPFeatureExtractor(
+                model_name=config.vision.model_name_or_path,
+                device=device,
+                dtype=torch.float16,
+            )
+            cache_real_coco_features(
+                image_ids=all_ids,
+                image_split_map=split_map,
+                cache_dir=config.data.feature_cache_dir,
+                extractor=extractor,
+                batch_size=64,
+                max_workers=32,
+                compress=config.vision.compress_2x2,
+            )
+            extractor.unload()
+        else:
+            print(f"[Vision Cache] All {len(all_ids)} required image features are already cached!")
+
+        trigger_modal_stage_commit("vision_cache")
 
     # 3. Load Qwen and Visual Connector
     print("\n" + "=" * 80)
@@ -241,6 +257,18 @@ def main():
             seed=config.training.seed,
         )
         eval_results["natural_vqa"] = natural_vqa_results
+
+        # Save per-suite evaluation outputs
+        with open(os.path.join(config.paths.output_dir, "grounding_eval_results.json"), "w", encoding="utf-8") as f:
+            json.dump(grounding_results, f, indent=2)
+        with open(os.path.join(config.paths.output_dir, "natural_vqa_eval_results.json"), "w", encoding="utf-8") as f:
+            json.dump(natural_vqa_results, f, indent=2)
+
+        ckpt_csv = os.path.join(config.paths.checkpoint_dir, "training_progress.csv")
+        out_csv = os.path.join(config.paths.output_dir, "training_progress.csv")
+        if os.path.exists(ckpt_csv) and not os.path.exists(out_csv):
+            import shutil
+            shutil.copy2(ckpt_csv, out_csv)
 
         trigger_modal_stage_commit("evaluate")
 

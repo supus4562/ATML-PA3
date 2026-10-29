@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import re
 import time
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -176,7 +177,7 @@ def evaluate_test_suite_4_conditions(
             # 2. Greedy Answer Generation
             question_only_ids = []
             for ex in pair_batch:
-                q_toks = tokenizer.encode(f"\n{ex.question}<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False)
+                q_toks = tokenizer.encode(f"\n{ex.question}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n", add_special_tokens=False)
                 question_only_ids.append(q_toks)
             q_max = max(len(q) for q in question_only_ids)
             q_padded = [q + [tokenizer.pad_token_id or 0] * (q_max - len(q)) for q in question_only_ids]
@@ -190,7 +191,13 @@ def evaluate_test_suite_4_conditions(
                 max_new_tokens=16,
             )
 
-            pred1, pred2 = gen_answers[0], gen_answers[1]
+            clean_answers = []
+            for ans in gen_answers:
+                cleaned = re.sub(r"<think>.*?</think>", "", ans, flags=re.DOTALL).strip()
+                cleaned = cleaned.replace("\n", " ").strip()
+                clean_answers.append(cleaned)
+
+            pred1, pred2 = clean_answers[0], clean_answers[1]
             total_answers += 2
             if not pred1.strip():
                 empty_answer_count += 1
