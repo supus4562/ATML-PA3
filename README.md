@@ -1,8 +1,10 @@
-# ATML PA3 - Task 1: Large Language Model Fine-Tuning
+# ATML PA3 - Deep Learning Pipelines: Task 1 & Task 2
 
-Modular, high-performance implementation for **Task 1: Large Language Model Fine-Tuning** of EE-5102 / CS-6304 Advanced Topics in Machine Learning (Programming Assignment 3).
+Modular, high-performance implementation for **Programming Assignment 3** of EE-5102 / CS-6304 Advanced Topics in Machine Learning:
+- **Task 1**: Large Language Model Fine-Tuning (Full FT, L2-SP, LoRA-4, LoRA-16, OPLoRA-16)
+- **Task 2**: Vision-Language Models and Visual Grounding (SigLIP-224, 2-Layer MLP Connector, Qwen3-0.6B LoRA, 3-Stage Curriculum, 4-Condition Evaluation)
 
-Optimized for **NVIDIA RTX 6000 Pro Blackwell / Ada / Hopper Architectures** to complete all 5 training runs, checkpointing, diagnostics, qualitative analysis, and 7 benchmark evaluations in under **30–35 minutes**.
+Optimized for **NVIDIA A100 / RTX 6000 Ada / Hopper Architectures** with FP16 AMP, flash attention, dynamic batching, and serverless Modal cloud execution.
 
 ---
 
@@ -121,3 +123,67 @@ Upon completion, all required evidence is automatically generated in `results/ta
 - `diagnostics.json`: $\rho_k$, $\eta$, and $R(z)$ on math vs non-math prompts across layers 0, 13, and 27.
 - `qualitative_responses.json`: Full 168-response catalog grouped by question ID and format.
 - `qualitative_annotations.md`: Markdown table auditing the 42-response subset (first and last question across all 3 formats and 7 conditions) for format compliance, coherence, repetition, unnecessary mathematical framing, and truncation flags.
+
+---
+
+## 6. Task 2: Vision-Language Models and Visual Grounding
+
+High-performance implementation of multimodal instruction tuning and visual grounding evaluation.
+
+### Model Architecture & Key Invariants
+- **Vision Backbone**: `google/siglip-base-patch16-224` (always frozen). Preprocesses images to 196 patch features in $14 \times 14$ spatial order with final LayerNorm. Cached in FP16 to disk; encoder is completely unloaded from GPU memory before Qwen initialization to save VRAM.
+- **Visual Connector**: 2-layer MLP (`Linear(768, 1024) -> GELU -> Linear(1024, 1024)`), trainable across all 3 stages. Evaluates initial vs final activation magnitudes against text token embeddings.
+- **Language Model**: `Qwen/Qwen3-0.6B` (thinking disabled). Original weights remain frozen throughout. LoRA ($r=16, \alpha=32$, dropout $0.05$) applied to projections `[q_proj, k_proj, v_proj, o_proj]` during Stages 2 and 3.
+
+### 3-Stage Curriculum Training (4,500 Updates = 72,000 Examples)
+- **Stage 1 (Caption Alignment)**:
+  - 2,250 updates (2 full passes over 18,000 COCO captions)
+  - Connector trained at peak LR $10^{-3}$; LLM entirely frozen.
+- **Stage 2 (Visual Instruction Tuning)**:
+  - 1,500 updates (24,000 examples)
+  - Connector peak LR $10^{-4}$, LoRA peak LR $2 \times 10^{-5}$
+  - Balanced mixture: 50% presence grounding, 25% counting grounding, 25% caption replay.
+- **Stage 3 (Natural VQA Specialization)**:
+  - 750 updates (12,000 examples)
+  - Connector peak LR $5 \times 10^{-5}$, LoRA peak LR $10^{-5}$
+  - Domain mixture: 70% VQAv2, 10% presence, 10% counting, 10% caption replay.
+- **Loss Invariant**: Example-weighted causal cross-entropy (averaged over response tokens per example, then across effective batch 16 = microbatch 8 $\times$ accumulation 2).
+
+### Evaluation Protocol
+Evaluates on 3 benchmarks (Presence Grounding, Counting Grounding, Natural VQAv2) across **4 image conditions**:
+1. **Correct**: Original image paired with question.
+2. **Complementary Swap**: Image swapped with semantic counter-example.
+3. **Mismatched**: Unrelated random image.
+4. **No-Image Ablation**: Zeroed visual tokens (pure text prior test).
+
+Metrics reported:
+- Exact Match / VQA Soft Consensus
+- Complete Pair Accuracy
+- Identical-Answer Rate & Empty-Answer Rate
+- Mean Reference NLL
+- Correct-Image Advantage: $\Delta\text{Acc} = \text{Acc}_{\text{correct}} - \text{Acc}_{\text{swap}}$, $\Delta\text{NLL} = \text{NLL}_{\text{swap}} - \text{NLL}_{\text{correct}}$
+- 95% Confidence Intervals via 4,000 bootstrap resamples over complete question pairs.
+
+---
+
+## 7. Running Task 2
+
+### Workstation / A100 Server Execution
+```bash
+# Run full Task 2 end-to-end pipeline:
+bash run_task2.sh
+
+# Or invoke with custom stages:
+python3 -m task2.run_all --stages stage1 stage2 stage3 evaluate synthesize
+```
+
+### Available Stages for Task 2
+`[all, prepare_data, cache_features, stage1, stage2, stage3, evaluate, synthesize]`
+
+### Output Deliverables in `results/task2/`
+- `stage_metrics.json`: Final training metrics across all stages.
+- `training_curves.csv`: Per-update step loss, learning rates, gradient norms, and visual-text magnitude ratios.
+- `evaluation_summary.json`: Detailed 4-condition scores, pair accuracies, and 95% bootstrap confidence intervals.
+- `eval_table_checkpoint_*.json`: Intermediate dev checkpoints at 500, 1000, 1500, etc.
+- `task2_final_report.md`: Markdown summary tables.
+
