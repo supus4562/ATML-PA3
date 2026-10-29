@@ -24,17 +24,26 @@ from task3.data import (
     load_task3_dataset,
     partition_dataset_splits,
     RolloutItem,
+    check_answer_correctness,
+)
+from task3.metrics import (
+    compute_visconf_scores,
+    compute_mean_logp,
+    compute_mean_self_certainty,
+    compute_visual_engagement,
 )
 from task3.selection import (
     generate_candidate_permutations,
     evaluate_question_budget,
     compute_paired_bootstrap_ci,
+    select_answer,
 )
 from task3.analysis import analyze_signals_at_n32
 from task3.live_refinement import run_live_refinement_experiment
 from task3.adaptive import (
     find_optimal_adaptive_thresholds,
     simulate_adaptive_sampling_policy,
+    check_adaptive_stop,
 )
 
 
@@ -440,6 +449,30 @@ def main():
         print("STEP 6: REPORT SYNTHESIS & QUALITATIVE ANNOTATIONS")
         print("=" * 80)
 
+        # Ensure all stage results are loaded into deliverables if available on disk
+        components = {
+            "repeated_sampling": "repeated_sampling_results.json",
+            "signal_analysis": "signal_analysis.json",
+            "live_refinement": "live_refinement_results.json",
+            "adaptive_sampling": "adaptive_sampling_results.json",
+        }
+        for key, fname in components.items():
+            if key not in deliverables:
+                fpath = os.path.join(config.paths.output_dir, fname)
+                if os.path.exists(fpath):
+                    try:
+                        with open(fpath, "r", encoding="utf-8") as fp:
+                            data = json.load(fp)
+                            if key == "repeated_sampling" and isinstance(data, dict) and "results" in data:
+                                deliverables["repeated_sampling"] = data["results"]
+                                if "bootstrap_ci" in data:
+                                    deliverables["bootstrap_ci_n32"] = data["bootstrap_ci"]
+                            else:
+                                deliverables[key] = data
+                        print(f"[Synthesis] Loaded existing '{key}' results from {fpath}")
+                    except Exception as e:
+                        print(f"[Synthesis] Warning: Failed to load {fpath}: {e}")
+
         # Qualitative annotations table
         p_anno = os.path.join(config.paths.output_dir, "qualitative_annotations.md")
         with open(p_anno, "w", encoding="utf-8") as f:
@@ -478,6 +511,77 @@ def main():
                 gold = rollouts[0].gold_answer
 
                 f.write(f"| {qid} | `{fa}` | `{sc}` | `{h_vc}` | `{r_vc}` | `{gold}` |\n")
+
+            f.write("\n## 3. Adaptive Early Stopping Case Studies\n\n")
+            f.write("Representative questions illustrating adaptive controller decisions (stopping budget $N \\in \\{4, 8, 16, 32\\}$) vs. fixed-32 SC.\n\n")
+            f.write("| Dataset | Question ID | Controller | Stopped $N$ | Selected Ans | Fixed-32 Ans | Gold Ans | Outcome Classification |\n")
+            f.write("|---|---|---|---|---|---|---|---|\n")
+
+            ad_res = deliverables.get("adaptive_sampling", {})
+            m_thresh = ad_res.get("dev_threshold_selection", {}).get("MATH", {})
+            mv_thresh = ad_res.get("dev_threshold_selection", {}).get("MathVista", {})
+
+            m_agr_tau = m_thresh.get("best_agreement_thresholds", {}).get("tau", 0.625)
+            m_qua_tau = m_thresh.get("best_quality_thresholds", {}).get("tau", 0.5)
+            m_qua_gamma = m_thresh.get("best_quality_thresholds", {}).get("gamma", 0.0)
+
+            mv_agr_tau = mv_thresh.get("best_agreement_thresholds", {}).get("tau", 0.5)
+            mv_qua_tau = mv_thresh.get("best_quality_thresholds", {}).get("tau", 0.5)
+            mv_qua_gamma = mv_thresh.get("best_quality_thresholds", {}).get("gamma", 0.0)
+
+            adaptive_cases = []
+            perm = permutations[0]
+            for dset, q_pool, q_ids, qua_t, qua_g in [
+                ("MATH", math_eval_pool, m_eval_ids[:20], m_qua_tau, m_qua_gamma),
+                ("MathVista", mv_eval_pool, mv_eval_ids[:20], mv_qua_tau, mv_qua_gamma),
+            ]:
+                for qid in q_ids:
+                    rollouts = q_pool[qid]
+                    gold = rollouts[0].gold_answer
+                    q_meta = rollouts[0].question_metadata
+
+                    # Fixed 32 SC
+                    cands32 = [rollouts[i] for i in perm[:32]]
+                    f32_ans, _, _ = select_answer(cands32, "self_consistency", dset)
+                    f32_corr = check_answer_correctness(f32_ans, gold, dset, q_meta)
+
+                    # Quality-aware controller
+                    stopped_n = 32
+                    sel_ans = f32_ans
+                    for n in [4, 8, 16]:
+                        cands_n = [rollouts[i] for i in perm[:n]]
+                        should_stop, ans = check_adaptive_stop(cands_n, "quality_aware", qua_t, qua_g, dset)
+                        if should_stop:
+                            stopped_n = n
+                            sel_ans = ans
+                            break
+
+                    sel_corr = check_answer_correctness(sel_ans, gold, dset, q_meta)
+
+                    if stopped_n < 32 and sel_corr:
+                        outcome = f"Efficient Exit (Saved {(1 - stopped_n/32)*100:.0f}% compute)"
+                    elif stopped_n < 32 and not sel_corr and f32_corr:
+                        outcome = "Premature Stop (Fixed-32 would succeed)"
+                    elif stopped_n < 32 and not sel_corr and not f32_corr:
+                        outcome = "Early Exit on Difficult Question"
+                    else:
+                        outcome = "Exhausted Budget (Full N=32 Needed)"
+
+                    adaptive_cases.append({
+                        "dataset": dset,
+                        "qid": qid,
+                        "controller": "Quality-Aware",
+                        "stopped_n": stopped_n,
+                        "sel_ans": sel_ans,
+                        "f32_ans": f32_ans,
+                        "gold": gold,
+                        "outcome": outcome,
+                    })
+
+            math_cases = [c for c in adaptive_cases if c["dataset"] == "MATH"][:5]
+            mv_cases = [c for c in adaptive_cases if c["dataset"] == "MathVista"][:5]
+            for c in math_cases + mv_cases:
+                f.write(f"| {c['dataset']} | {c['qid']} | {c['controller']} | $N={c['stopped_n']}$ | `{c['sel_ans']}` | `{c['f32_ans']}` | `{c['gold']}` | {c['outcome']} |\n")
 
         print(f"[Synthesis] Saved qualitative annotations table to {p_anno}")
 
