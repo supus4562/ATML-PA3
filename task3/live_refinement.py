@@ -310,11 +310,11 @@ def run_live_refinement_experiment(
             "time_sec": total_ref_time,
         })
 
-        q_time_total = dt1 + sum(parallel_times) + dt_ref
-        q_tok_out = out1_len + sum(parallel_lens) + ref_out_len
-        print(f"  [Live Refinement Q {q_idx+1:2d}/{len(questions)}] ({q_id}) in {q_time_total:.1f}s ({q_tok_out} toks) | "
-              f"Single: {'✓' if corr1 else '✗'} | SC: {'✓' if corr_sc else '✗'} | Refined: {'✓' if corr_ref else '✗'} "
-              f"| Running: S={s1_res['correct']} P={s2_res['correct']} R={s3_res['correct']}", flush=True)
+        if (q_idx + 1) % 10 == 0 or (q_idx + 1) == len(questions):
+            print(f"  [Live Refinement] Completed {q_idx + 1:2d}/{len(questions)} questions | "
+                  f"Single: {s1_res['correct']}/{q_idx+1} | "
+                  f"Parallel: {s2_res['correct']}/{q_idx+1} | "
+                  f"Refined: {s3_res['correct']}/{q_idx+1}")
 
     if torch.cuda.is_available():
         results["peak_vram_mb"] = float(torch.cuda.max_memory_allocated() / (1024 * 1024))
